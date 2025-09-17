@@ -1,0 +1,4 @@
+# This file ensures the analytics_output/ directory is tracked by git
+# Analytics results will be generated here by:
+# - advanced_analytics.py
+# - adaptive_thresholds.py

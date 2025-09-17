@@ -1,0 +1,7 @@
+__pycache__/
+vector_db/
+data/
+models/model.pth
+rmsai_metadata.db
+rmsai_processor.log
+

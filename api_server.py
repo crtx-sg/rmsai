@@ -1,0 +1,744 @@
+#!/usr/bin/env python3
+"""
+RMSAI Streaming API Server
+==========================
+
+RESTful API for real-time access to RMSAI processing results, embeddings, and anomaly data.
+Provides endpoints for querying anomalies, similarity search, and real-time updates.
+
+Features:
+- Real-time processing statistics
+- Anomaly querying with filters
+- Vector similarity search via ChromaDB
+- Event details and metadata access
+- WebSocket support for live updates
+- CORS enabled for web dashboards
+
+Usage:
+    python api_server.py
+
+    # Access API at http://localhost:8000
+    # Documentation at http://localhost:8000/docs
+"""
+
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
+from pydantic import BaseModel
+from typing import List, Optional, Dict, Any
+import sqlite3
+import asyncio
+from datetime import datetime, timedelta
+import json
+import logging
+import uvicorn
+
+# Optional ChromaDB import
+try:
+    import chromadb
+    CHROMADB_AVAILABLE = True
+except ImportError:
+    CHROMADB_AVAILABLE = False
+
+app = FastAPI(
+    title="RMSAI Anomaly Detection API",
+    description="Real-time API for ECG anomaly detection and embedding analysis",
+    version="1.0.0"
+)
+
+# Enable CORS for web dashboards
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Configuration
+DB_PATH = "rmsai_metadata.db"
+VECTOR_DB_PATH = "vector_db"
+
+# Pydantic models
+class AnomalyQuery(BaseModel):
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
+    condition: Optional[str] = None
+    lead_name: Optional[str] = None
+    min_error_score: Optional[float] = None
+    max_error_score: Optional[float] = None
+    limit: int = 100
+
+class SimilaritySearch(BaseModel):
+    chunk_id: str
+    n_results: int = 5
+    threshold: Optional[float] = None
+    include_metadata: bool = True
+
+class ProcessingStats(BaseModel):
+    total_chunks: int
+    total_anomalies: int
+    anomaly_rate: float
+    avg_error_score: float
+    files_processed: int
+    conditions_detected: Dict[str, int]
+    leads_processed: Dict[str, int]
+    last_updated: str
+    uptime_hours: float
+
+class ChunkDetail(BaseModel):
+    chunk_id: str
+    event_id: str
+    source_file: str
+    lead_name: str
+    anomaly_status: str
+    anomaly_type: Optional[str]
+    error_score: float
+    vector_id: Optional[str]
+    processing_timestamp: str
+    metadata: Optional[Dict[str, Any]] = None
+
+class EventDetail(BaseModel):
+    event_id: str
+    source_file: str
+    total_chunks: int
+    anomaly_count: int
+    avg_error_score: float
+    conditions: List[str]
+    chunks: List[ChunkDetail]
+
+# Global variables for caching
+_stats_cache = None
+_stats_cache_time = None
+CACHE_DURATION = 30  # seconds
+
+# WebSocket connection manager
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: List[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+        logger.info(f"WebSocket connected. Total connections: {len(self.active_connections)}")
+
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+        logger.info(f"WebSocket disconnected. Total connections: {len(self.active_connections)}")
+
+    async def send_personal_message(self, message: str, websocket: WebSocket):
+        try:
+            await websocket.send_text(message)
+        except:
+            self.disconnect(websocket)
+
+    async def broadcast(self, message: str):
+        disconnected = []
+        for connection in self.active_connections:
+            try:
+                await connection.send_text(message)
+            except:
+                disconnected.append(connection)
+
+        # Remove disconnected clients
+        for connection in disconnected:
+            self.disconnect(connection)
+
+manager = ConnectionManager()
+
+# Utility functions
+def get_db_connection():
+    """Get SQLite database connection"""
+    try:
+        return sqlite3.connect(DB_PATH)
+    except Exception as e:
+        logger.error(f"Database connection error: {e}")
+        raise HTTPException(status_code=500, detail="Database connection failed")
+
+def get_vector_db():
+    """Get ChromaDB client and collection"""
+    if not CHROMADB_AVAILABLE:
+        raise HTTPException(status_code=500, detail="ChromaDB not available")
+
+    try:
+        client = chromadb.PersistentClient(path=VECTOR_DB_PATH)
+        collection = client.get_collection("rmsai_ecg_embeddings")
+        return client, collection
+    except Exception as e:
+        logger.error(f"Vector database error: {e}")
+        raise HTTPException(status_code=500, detail="Vector database connection failed")
+
+# API Endpoints
+
+@app.get("/")
+async def root():
+    """Root endpoint with API information"""
+    return {
+        "message": "RMSAI Anomaly Detection API",
+        "version": "1.0.0",
+        "docs": "/docs",
+        "health": "/health",
+        "stats": "/api/v1/stats"
+    }
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    try:
+        # Check database connectivity
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM chunks LIMIT 1")
+            chunk_count = cursor.fetchone()[0]
+
+        # Check vector database if available
+        vector_status = "not_available"
+        if CHROMADB_AVAILABLE:
+            try:
+                _, collection = get_vector_db()
+                vector_count = collection.count()
+                vector_status = "available"
+            except:
+                vector_status = "error"
+
+        return {
+            "status": "healthy",
+            "timestamp": datetime.now().isoformat(),
+            "database": "connected",
+            "chunk_count": chunk_count,
+            "vector_database": vector_status
+        }
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Health check failed: {str(e)}")
+
+@app.get("/api/v1/stats", response_model=ProcessingStats)
+async def get_processing_stats():
+    """Get comprehensive processing statistics with caching"""
+    global _stats_cache, _stats_cache_time
+
+    # Check cache
+    now = datetime.now()
+    if (_stats_cache and _stats_cache_time and
+        (now - _stats_cache_time).total_seconds() < CACHE_DURATION):
+        return _stats_cache
+
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+
+            # Basic counts
+            cursor.execute("SELECT COUNT(*) FROM chunks")
+            total_chunks = cursor.fetchone()[0]
+
+            cursor.execute("SELECT COUNT(*) FROM chunks WHERE anomaly_status='anomaly'")
+            total_anomalies = cursor.fetchone()[0]
+
+            cursor.execute("SELECT AVG(error_score) FROM chunks")
+            avg_error = cursor.fetchone()[0] or 0
+
+            cursor.execute("SELECT COUNT(*) FROM processed_files WHERE status='completed'")
+            files_processed = cursor.fetchone()[0]
+
+            # Condition distribution
+            cursor.execute("""
+                SELECT anomaly_type, COUNT(*)
+                FROM chunks
+                WHERE anomaly_type IS NOT NULL
+                GROUP BY anomaly_type
+            """)
+            conditions_detected = dict(cursor.fetchall())
+
+            # Lead distribution
+            cursor.execute("""
+                SELECT lead_name, COUNT(*)
+                FROM chunks
+                GROUP BY lead_name
+            """)
+            leads_processed = dict(cursor.fetchall())
+
+            # Calculate uptime (time since first processing)
+            cursor.execute("SELECT MIN(processing_timestamp) FROM chunks")
+            first_timestamp = cursor.fetchone()[0]
+
+            uptime_hours = 0
+            if first_timestamp:
+                first_time = datetime.fromisoformat(first_timestamp)
+                uptime_hours = (now - first_time).total_seconds() / 3600
+
+            anomaly_rate = (total_anomalies / total_chunks * 100) if total_chunks > 0 else 0
+
+            stats = ProcessingStats(
+                total_chunks=total_chunks,
+                total_anomalies=total_anomalies,
+                anomaly_rate=round(anomaly_rate, 2),
+                avg_error_score=round(avg_error, 4),
+                files_processed=files_processed,
+                conditions_detected=conditions_detected,
+                leads_processed=leads_processed,
+                last_updated=now.isoformat(),
+                uptime_hours=round(uptime_hours, 2)
+            )
+
+            # Cache the result
+            _stats_cache = stats
+            _stats_cache_time = now
+
+            return stats
+
+    except Exception as e:
+        logger.error(f"Error getting stats: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/v1/anomalies")
+async def query_anomalies(query: AnomalyQuery):
+    """Query anomalies with advanced filtering options"""
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+
+            # Build dynamic query
+            where_conditions = ["anomaly_status = 'anomaly'"]
+            params = []
+
+            if query.condition:
+                where_conditions.append("anomaly_type LIKE ?")
+                params.append(f"%{query.condition}%")
+
+            if query.lead_name:
+                where_conditions.append("lead_name = ?")
+                params.append(query.lead_name)
+
+            if query.min_error_score is not None:
+                where_conditions.append("error_score >= ?")
+                params.append(query.min_error_score)
+
+            if query.max_error_score is not None:
+                where_conditions.append("error_score <= ?")
+                params.append(query.max_error_score)
+
+            if query.start_time:
+                where_conditions.append("processing_timestamp >= ?")
+                params.append(query.start_time)
+
+            if query.end_time:
+                where_conditions.append("processing_timestamp <= ?")
+                params.append(query.end_time)
+
+            where_clause = " AND ".join(where_conditions)
+
+            sql = f"""
+                SELECT chunk_id, event_id, source_file, lead_name,
+                       anomaly_type, error_score, processing_timestamp,
+                       vector_id, metadata
+                FROM chunks
+                WHERE {where_clause}
+                ORDER BY error_score DESC
+                LIMIT ?
+            """
+            params.append(query.limit)
+
+            cursor.execute(sql, params)
+            results = cursor.fetchall()
+
+            anomalies = []
+            for row in results:
+                metadata = json.loads(row[8]) if row[8] else None
+                anomalies.append({
+                    "chunk_id": row[0],
+                    "event_id": row[1],
+                    "source_file": row[2],
+                    "lead_name": row[3],
+                    "anomaly_type": row[4],
+                    "error_score": round(row[5], 4),
+                    "processing_timestamp": row[6],
+                    "vector_id": row[7],
+                    "metadata": metadata
+                })
+
+            return {
+                "anomalies": anomalies,
+                "count": len(anomalies),
+                "query": query.dict(),
+                "timestamp": datetime.now().isoformat()
+            }
+
+    except Exception as e:
+        logger.error(f"Error querying anomalies: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/v1/search/similar")
+async def search_similar_embeddings(search: SimilaritySearch):
+    """Find similar ECG patterns using vector similarity"""
+    if not CHROMADB_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Vector search not available")
+
+    try:
+        _, collection = get_vector_db()
+
+        # Get the reference embedding
+        reference = collection.get(
+            ids=[search.chunk_id],
+            include=['embeddings', 'metadatas'] if search.include_metadata else ['embeddings']
+        )
+
+        if not reference['embeddings']:
+            raise HTTPException(status_code=404, detail=f"Chunk {search.chunk_id} not found")
+
+        # Search for similar embeddings
+        results = collection.query(
+            query_embeddings=reference['embeddings'],
+            n_results=search.n_results + 1,  # +1 to exclude self
+            include=['metadatas', 'distances'] if search.include_metadata else ['distances']
+        )
+
+        similar_chunks = []
+        for i, chunk_id in enumerate(results['ids'][0]):
+            if chunk_id != search.chunk_id:  # Exclude self
+                distance = results['distances'][0][i]
+                similarity_score = max(0, 1 - distance)  # Convert distance to similarity
+
+                if search.threshold is None or similarity_score >= search.threshold:
+                    chunk_info = {
+                        "chunk_id": chunk_id,
+                        "similarity_score": round(similarity_score, 4),
+                        "distance": round(distance, 4)
+                    }
+
+                    if search.include_metadata and 'metadatas' in results:
+                        chunk_info["metadata"] = results['metadatas'][0][i]
+
+                    similar_chunks.append(chunk_info)
+
+        # Limit results after filtering
+        similar_chunks = similar_chunks[:search.n_results]
+
+        return {
+            "reference_chunk": search.chunk_id,
+            "similar_chunks": similar_chunks,
+            "count": len(similar_chunks),
+            "search_params": search.dict(),
+            "timestamp": datetime.now().isoformat()
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in similarity search: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/v1/events/{event_id}", response_model=EventDetail)
+async def get_event_details(event_id: str):
+    """Get detailed information about a specific event"""
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute("""
+                SELECT chunk_id, source_file, lead_name, anomaly_status,
+                       anomaly_type, error_score, vector_id, processing_timestamp, metadata
+                FROM chunks
+                WHERE event_id = ?
+                ORDER BY lead_name
+            """, (event_id,))
+
+            rows = cursor.fetchall()
+
+            if not rows:
+                raise HTTPException(status_code=404, detail=f"Event {event_id} not found")
+
+            # Process chunks
+            chunks = []
+            conditions = set()
+            total_error = 0
+            anomaly_count = 0
+
+            for row in rows:
+                metadata = json.loads(row[8]) if row[8] else None
+
+                chunk = ChunkDetail(
+                    chunk_id=row[0],
+                    event_id=event_id,
+                    source_file=row[1],
+                    lead_name=row[2],
+                    anomaly_status=row[3],
+                    anomaly_type=row[4],
+                    error_score=round(row[5], 4),
+                    vector_id=row[6],
+                    processing_timestamp=row[7],
+                    metadata=metadata
+                )
+                chunks.append(chunk)
+
+                if row[4]:  # anomaly_type
+                    conditions.add(row[4])
+                if row[3] == 'anomaly':
+                    anomaly_count += 1
+                total_error += row[5]
+
+            avg_error = total_error / len(chunks) if chunks else 0
+
+            event_detail = EventDetail(
+                event_id=event_id,
+                source_file=chunks[0].source_file,
+                total_chunks=len(chunks),
+                anomaly_count=anomaly_count,
+                avg_error_score=round(avg_error, 4),
+                conditions=list(conditions),
+                chunks=chunks
+            )
+
+            return event_detail
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting event details: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/v1/conditions")
+async def get_conditions():
+    """Get list of all detected conditions with statistics"""
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute("""
+                SELECT anomaly_type,
+                       COUNT(*) as total_chunks,
+                       SUM(CASE WHEN anomaly_status = 'anomaly' THEN 1 ELSE 0 END) as anomaly_chunks,
+                       AVG(error_score) as avg_error_score,
+                       MIN(error_score) as min_error_score,
+                       MAX(error_score) as max_error_score
+                FROM chunks
+                WHERE anomaly_type IS NOT NULL
+                GROUP BY anomaly_type
+                ORDER BY total_chunks DESC
+            """)
+
+            results = cursor.fetchall()
+
+            conditions = []
+            for row in results:
+                condition_name = row[0]
+                total_chunks = row[1]
+                anomaly_chunks = row[2]
+                anomaly_rate = (anomaly_chunks / total_chunks * 100) if total_chunks > 0 else 0
+
+                conditions.append({
+                    "condition": condition_name,
+                    "total_chunks": total_chunks,
+                    "anomaly_chunks": anomaly_chunks,
+                    "anomaly_rate": round(anomaly_rate, 2),
+                    "avg_error_score": round(row[3], 4),
+                    "min_error_score": round(row[4], 4),
+                    "max_error_score": round(row[5], 4)
+                })
+
+            return {
+                "conditions": conditions,
+                "total_conditions": len(conditions),
+                "timestamp": datetime.now().isoformat()
+            }
+
+    except Exception as e:
+        logger.error(f"Error getting conditions: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/v1/leads")
+async def get_leads():
+    """Get list of all ECG leads with statistics"""
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute("""
+                SELECT lead_name,
+                       COUNT(*) as total_chunks,
+                       SUM(CASE WHEN anomaly_status = 'anomaly' THEN 1 ELSE 0 END) as anomaly_chunks,
+                       AVG(error_score) as avg_error_score
+                FROM chunks
+                GROUP BY lead_name
+                ORDER BY lead_name
+            """)
+
+            results = cursor.fetchall()
+
+            leads = []
+            for row in results:
+                lead_name = row[0]
+                total_chunks = row[1]
+                anomaly_chunks = row[2]
+                anomaly_rate = (anomaly_chunks / total_chunks * 100) if total_chunks > 0 else 0
+
+                leads.append({
+                    "lead_name": lead_name,
+                    "total_chunks": total_chunks,
+                    "anomaly_chunks": anomaly_chunks,
+                    "anomaly_rate": round(anomaly_rate, 2),
+                    "avg_error_score": round(row[3], 4)
+                })
+
+            return {
+                "leads": leads,
+                "total_leads": len(leads),
+                "timestamp": datetime.now().isoformat()
+            }
+
+    except Exception as e:
+        logger.error(f"Error getting leads: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# WebSocket endpoint for real-time updates
+@app.websocket("/ws/live-updates")
+async def websocket_endpoint(websocket: WebSocket):
+    """WebSocket endpoint for real-time processing updates"""
+    await manager.connect(websocket)
+
+    try:
+        last_chunk_count = 0
+
+        # Send initial stats
+        try:
+            stats = await get_processing_stats()
+            await manager.send_personal_message(
+                json.dumps({
+                    "type": "initial_stats",
+                    "data": stats.dict()
+                }),
+                websocket
+            )
+        except:
+            pass
+
+        while True:
+            try:
+                # Check for new processing results
+                with get_db_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT COUNT(*) FROM chunks")
+                    current_count = cursor.fetchone()[0]
+
+                    if current_count > last_chunk_count:
+                        # Get latest chunks
+                        cursor.execute("""
+                            SELECT chunk_id, event_id, lead_name, anomaly_status,
+                                   error_score, processing_timestamp
+                            FROM chunks
+                            ORDER BY id DESC
+                            LIMIT ?
+                        """, (current_count - last_chunk_count,))
+
+                        new_chunks = cursor.fetchall()
+
+                        for chunk in new_chunks:
+                            await manager.send_personal_message(
+                                json.dumps({
+                                    "type": "new_chunk",
+                                    "data": {
+                                        "chunk_id": chunk[0],
+                                        "event_id": chunk[1],
+                                        "lead_name": chunk[2],
+                                        "anomaly_status": chunk[3],
+                                        "error_score": round(chunk[4], 4),
+                                        "processing_timestamp": chunk[5],
+                                        "timestamp": datetime.now().isoformat()
+                                    }
+                                }),
+                                websocket
+                            )
+
+                        last_chunk_count = current_count
+
+                # Send periodic stats update
+                if last_chunk_count % 50 == 0 and last_chunk_count > 0:
+                    try:
+                        stats = await get_processing_stats()
+                        await manager.send_personal_message(
+                            json.dumps({
+                                "type": "stats_update",
+                                "data": stats.dict()
+                            }),
+                            websocket
+                        )
+                    except:
+                        pass
+
+                await asyncio.sleep(2)  # Check every 2 seconds
+
+            except WebSocketDisconnect:
+                break
+            except Exception as e:
+                logger.error(f"WebSocket error: {e}")
+                await manager.send_personal_message(
+                    json.dumps({
+                        "type": "error",
+                        "message": str(e)
+                    }),
+                    websocket
+                )
+                break
+
+    except WebSocketDisconnect:
+        pass
+    finally:
+        manager.disconnect(websocket)
+
+# Simple HTML page for WebSocket testing
+@app.get("/test-websocket")
+async def websocket_test_page():
+    """Simple test page for WebSocket functionality"""
+    html_content = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>RMSAI WebSocket Test</title>
+    </head>
+    <body>
+        <h1>RMSAI Real-time Updates</h1>
+        <div id="messages"></div>
+        <script>
+            const ws = new WebSocket("ws://localhost:8000/ws/live-updates");
+            const messages = document.getElementById('messages');
+
+            ws.onmessage = function(event) {
+                const data = JSON.parse(event.data);
+                const div = document.createElement('div');
+                div.innerHTML = '<pre>' + JSON.stringify(data, null, 2) + '</pre>';
+                messages.appendChild(div);
+                messages.scrollTop = messages.scrollHeight;
+            };
+
+            ws.onopen = function(event) {
+                const div = document.createElement('div');
+                div.innerHTML = '<strong>Connected to WebSocket</strong>';
+                messages.appendChild(div);
+            };
+
+            ws.onclose = function(event) {
+                const div = document.createElement('div');
+                div.innerHTML = '<strong>WebSocket connection closed</strong>';
+                messages.appendChild(div);
+            };
+        </script>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
+
+if __name__ == "__main__":
+    logger.info("Starting RMSAI API Server...")
+    logger.info("API Documentation: http://localhost:8000/docs")
+    logger.info("WebSocket Test: http://localhost:8000/test-websocket")
+
+    uvicorn.run(
+        "api_server:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=False,
+        log_level="info"
+    )

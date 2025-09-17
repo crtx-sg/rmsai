@@ -1,0 +1,4 @@
+# This file ensures the models/ directory is tracked by git
+# Place your pre-trained model files here:
+# - model.pth (LSTM autoencoder weights)
+# Note: Large model files should use Git LFS or external storage
