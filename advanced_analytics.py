@@ -265,23 +265,35 @@ class EmbeddingAnalytics:
                 continue
 
             cluster_mask = labels == cluster_id
-            cluster_metadata = metadata[cluster_mask]
+            cluster_metadata = metadata[cluster_mask].copy()
             cluster_embeddings = embeddings[cluster_mask]
 
             if len(cluster_metadata) == 0:
                 continue
 
             # Clinical condition distribution
-            condition_dist = cluster_metadata['condition'].value_counts()
+            if 'condition' in cluster_metadata.columns:
+                condition_dist = cluster_metadata['condition'].value_counts()
+            else:
+                condition_dist = pd.Series(dtype='int64')
 
             # Lead distribution
-            lead_dist = cluster_metadata['lead_name'].value_counts()
+            if 'lead_name' in cluster_metadata.columns:
+                lead_dist = cluster_metadata['lead_name'].value_counts()
+            else:
+                lead_dist = pd.Series(dtype='int64')
 
             # Error score statistics
-            error_stats = cluster_metadata['error_score'].describe()
+            if 'error_score' in cluster_metadata.columns:
+                error_stats = cluster_metadata['error_score'].describe()
+            else:
+                error_stats = pd.Series([0, 0, 0, 0, 0, 0, 0, 0], index=['count', 'mean', 'std', 'min', '25%', '50%', '75%', 'max'])
 
             # Anomaly rate
-            anomaly_rate = (cluster_metadata['anomaly_status'] == 'anomaly').mean()
+            if 'anomaly_status' in cluster_metadata.columns:
+                anomaly_rate = (cluster_metadata['anomaly_status'] == 'anomaly').mean()
+            else:
+                anomaly_rate = 0.0
 
             # Embedding statistics
             centroid = np.mean(cluster_embeddings, axis=0)
@@ -397,12 +409,21 @@ class EmbeddingAnalytics:
             # Analyze consensus anomalies
             if consensus_anomalies:
                 consensus_metadata = metadata.iloc[list(consensus_anomalies)]
-                results['consensus_analysis'] = {
-                    'condition_distribution': consensus_metadata['condition'].value_counts().to_dict(),
-                    'lead_distribution': consensus_metadata['lead_name'].value_counts().to_dict(),
-                    'avg_error_score': round(consensus_metadata['error_score'].mean(), 4),
-                    'anomaly_rate': round((consensus_metadata['anomaly_status'] == 'anomaly').mean(), 4)
-                }
+                consensus_analysis = {}
+
+                if 'condition' in consensus_metadata.columns:
+                    consensus_analysis['condition_distribution'] = consensus_metadata['condition'].value_counts().to_dict()
+
+                if 'lead_name' in consensus_metadata.columns:
+                    consensus_analysis['lead_distribution'] = consensus_metadata['lead_name'].value_counts().to_dict()
+
+                if 'error_score' in consensus_metadata.columns:
+                    consensus_analysis['avg_error_score'] = round(consensus_metadata['error_score'].mean(), 4)
+
+                if 'anomaly_status' in consensus_metadata.columns:
+                    consensus_analysis['anomaly_rate'] = round((consensus_metadata['anomaly_status'] == 'anomaly').mean(), 4)
+
+                results['consensus_analysis'] = consensus_analysis
 
         return results
 
@@ -424,40 +445,44 @@ class EmbeddingAnalytics:
         results = {}
 
         # Hourly patterns
-        hourly_anomalies = metadata.groupby('hour')['anomaly_status'].apply(
-            lambda x: (x == 'anomaly').mean()
-        )
+        results['hourly_patterns'] = {}
 
-        hourly_error_scores = metadata.groupby('hour')['error_score'].mean()
+        if 'anomaly_status' in metadata.columns:
+            hourly_anomalies = metadata.groupby('hour')['anomaly_status'].apply(
+                lambda x: (x == 'anomaly').mean()
+            )
+            results['hourly_patterns']['anomaly_rates'] = hourly_anomalies.to_dict()
 
-        results['hourly_patterns'] = {
-            'anomaly_rates': hourly_anomalies.to_dict(),
-            'avg_error_scores': hourly_error_scores.to_dict()
-        }
+        if 'error_score' in metadata.columns:
+            hourly_error_scores = metadata.groupby('hour')['error_score'].mean()
+            results['hourly_patterns']['avg_error_scores'] = hourly_error_scores.to_dict()
 
         # Daily patterns
-        daily_anomalies = metadata.groupby('day_of_week')['anomaly_status'].apply(
-            lambda x: (x == 'anomaly').mean()
-        )
-
         results['daily_patterns'] = {
-            'anomaly_rates': daily_anomalies.to_dict(),
             'day_names': ['Monday', 'Tuesday', 'Wednesday', 'Thursday',
                          'Friday', 'Saturday', 'Sunday']
         }
 
-        # Condition temporal patterns
-        condition_temporal = metadata.groupby(['condition', 'hour']).size().unstack(fill_value=0)
+        if 'anomaly_status' in metadata.columns:
+            daily_anomalies = metadata.groupby('day_of_week')['anomaly_status'].apply(
+                lambda x: (x == 'anomaly').mean()
+            )
+            results['daily_patterns']['anomaly_rates'] = daily_anomalies.to_dict()
 
+        # Condition temporal patterns
         results['condition_temporal'] = {
-            'patterns': condition_temporal.to_dict(),
+            'patterns': {},
             'peak_hours': {}
         }
 
-        # Find peak hours for each condition
-        for condition in condition_temporal.index:
-            peak_hour = condition_temporal.loc[condition].idxmax()
-            results['condition_temporal']['peak_hours'][condition] = int(peak_hour)
+        if 'condition' in metadata.columns:
+            condition_temporal = metadata.groupby(['condition', 'hour']).size().unstack(fill_value=0)
+            results['condition_temporal']['patterns'] = condition_temporal.to_dict()
+
+            # Find peak hours for each condition
+            for condition in condition_temporal.index:
+                peak_hour = condition_temporal.loc[condition].idxmax()
+                results['condition_temporal']['peak_hours'][condition] = int(peak_hour)
 
         # Processing volume over time
         daily_volume = metadata.groupby('date').size()
@@ -525,15 +550,27 @@ class EmbeddingAnalytics:
                     else:
                         avg_internal_similarity = 0
 
-                    similarity_groups[f'group_{group_id}'] = {
+                    group_data = {
                         'size': int(group_size),
-                        'chunk_ids': group_metadata['chunk_id'].tolist()[:50],  # Limit for output size
-                        'conditions': group_metadata['condition'].value_counts().to_dict(),
-                        'leads': group_metadata['lead_name'].value_counts().to_dict(),
-                        'avg_error_score': round(group_metadata['error_score'].mean(), 4),
-                        'anomaly_rate': round((group_metadata['anomaly_status'] == 'anomaly').mean(), 4),
                         'avg_internal_similarity': round(avg_internal_similarity, 4)
                     }
+
+                    if 'chunk_id' in group_metadata.columns:
+                        group_data['chunk_ids'] = group_metadata['chunk_id'].tolist()[:50]  # Limit for output size
+
+                    if 'condition' in group_metadata.columns:
+                        group_data['conditions'] = group_metadata['condition'].value_counts().to_dict()
+
+                    if 'lead_name' in group_metadata.columns:
+                        group_data['leads'] = group_metadata['lead_name'].value_counts().to_dict()
+
+                    if 'error_score' in group_metadata.columns:
+                        group_data['avg_error_score'] = round(group_metadata['error_score'].mean(), 4)
+
+                    if 'anomaly_status' in group_metadata.columns:
+                        group_data['anomaly_rate'] = round((group_metadata['anomaly_status'] == 'anomaly').mean(), 4)
+
+                    similarity_groups[f'group_{group_id}'] = group_data
 
                     group_sizes.append(group_size)
 

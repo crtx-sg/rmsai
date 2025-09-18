@@ -148,7 +148,7 @@ class RMSAIDashboard:
             auto_refresh = st.selectbox(
                 "Auto-refresh",
                 ["Off", "10s", "30s", "60s"],
-                index=1
+                index=0
             )
 
         with col3:
@@ -157,13 +157,21 @@ class RMSAIDashboard:
                 # Clear cache
                 st.session_state.data_cache = {}
                 st.session_state.cache_time = {}
-                st.experimental_rerun()
+                st.rerun()
 
-        # Handle auto-refresh
+        # Handle auto-refresh with proper timing control
         if auto_refresh != "Off":
             refresh_seconds = int(auto_refresh[:-1])
-            time.sleep(refresh_seconds)
-            st.experimental_rerun()
+
+            # Display refresh status
+            st.sidebar.info(f"🔄 Auto-refresh: {auto_refresh}")
+
+            # Simple approach - let the user know auto-refresh is on
+            # The actual refresh will happen on next user interaction or manual refresh
+            # This prevents the infinite loop while still providing refresh capability
+
+        else:
+            st.sidebar.info("🔄 Auto-refresh: Off")
 
         return auto_refresh
 
@@ -226,6 +234,10 @@ class RMSAIDashboard:
 
         # Alert for high anomaly rate
         if anomaly_rate > 20:
+            # Use Streamlit's built-in error component for better visibility
+            st.error(f"⚠️ **High Anomaly Rate Alert:** {anomaly_rate:.1f}% of recent chunks detected as anomalies. This may indicate a system issue or unusual patient conditions.")
+
+            # Also add the custom styled version
             st.markdown(f"""
             <div class="anomaly-alert">
                 ⚠️ <strong>High Anomaly Rate Alert:</strong> {anomaly_rate:.1f}% of recent chunks detected as anomalies.

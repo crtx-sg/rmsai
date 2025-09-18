@@ -13,12 +13,14 @@ The RMSAI Enhanced ECG Anomaly Detection System is a comprehensive real-time pro
 5. [Installation & Setup](#installation--setup)
 6. [Quick Start Guide](#quick-start-guide)
 7. [Testing & Validation](#testing--validation)
-8. [API Reference](#api-reference)
-9. [Configuration](#configuration)
-10. [Performance Benchmarks](#performance-benchmarks)
-11. [Clinical Applications](#clinical-applications)
-12. [Troubleshooting](#troubleshooting)
-13. [Development & Extension](#development--extension)
+8. [Analysis Tools](#analysis-tools)
+9. [Command-Line Demonstrations](#command-line-demonstrations)
+10. [API Reference](#api-reference)
+11. [Configuration](#configuration)
+12. [Performance Benchmarks](#performance-benchmarks)
+13. [Clinical Applications](#clinical-applications)
+14. [Troubleshooting](#troubleshooting)
+15. [Development & Extension](#development--extension)
 
 ## System Architecture
 
@@ -562,16 +564,60 @@ with h5py.File('patient_data.h5', 'r') as f:
     pacer_sample = ecg_signal[pacer_offset] if pacer_offset < len(ecg_signal) else None
 ```
 
+### Advanced ECG Processing Architecture
+
+#### Intelligent Chunking Strategy
+The RMSAI system addresses the challenge of processing long ECG recordings (2400 samples, 12 seconds) with LSTM models optimized for shorter sequences (140 samples):
+
+```python
+# Data Flow: HDF5 → Chunking → LSTM → Vector Storage
+def process_ecg_event():
+    # Step 1: Extract 12-second ECG (2400 samples @ 200Hz)
+    ecg_data = hdf5_file['event_1001/ecg/ECG1'][:]  # [2400]
+
+    # Step 2: Sliding window chunking with overlap
+    chunk_size = 140     # Model's expected sequence length
+    step_size = 70       # 50% overlap for better coverage
+
+    for start in range(0, len(ecg_data) - chunk_size + 1, step_size):
+        chunk = ecg_data[start:start + chunk_size]  # [140]
+
+        # Step 3: LSTM processing
+        embedding = lstm_model.encode(chunk)         # [140] → [128]
+        reconstruction = lstm_model.decode(embedding) # [128] → [140]
+        error_score = mse(chunk, reconstruction)
+
+        # Step 4: Store results
+        chromadb.add(embeddings=[embedding])         # Vector similarity
+        sqlite.insert(chunk_id, error_score)        # Metadata tracking
+```
+
+#### Architecture Benefits:
+- **Temporal Coverage**: 50% overlap ensures no signal information is lost
+- **Model Compatibility**: Aligns with pre-trained LSTM architecture
+- **Scalability**: Processes arbitrarily long ECG recordings
+- **Granular Analysis**: Detects anomalies within sub-segments of ECG events
+
+#### Performance Characteristics:
+```python
+# Per 12-second ECG event:
+chunks_per_lead = 10      # ~17 possible, limited for performance
+total_chunks = 70         # 10 chunks × 7 leads
+embeddings_generated = 70 # 128-dimensional vectors
+processing_time = ~10s    # Including I/O and vector storage
+```
+
 ## Enhanced Processing Components
 
 ### Core System Files
 
 #### 🏗️ **rmsai_model.py** - LSTM Autoencoder Architecture
-Contains the core neural network model classes:
+Contains the core neural network model classes optimized for short ECG sequences:
 - **`RecurrentAutoencoder`**: Main autoencoder combining encoder and decoder
-- **`Encoder`**: LSTM-based encoder for generating 64-dimensional embeddings
+- **`Encoder`**: LSTM-based encoder for generating 128-dimensional embeddings from 140-sample sequences
 - **`Decoder`**: LSTM-based decoder for signal reconstruction
-- **Training utilities**: Functions for model training and prediction
+- **Model Configuration**: seq_len=140, n_features=1, embedding_dim=128
+- **Training utilities**: Functions for model training and prediction with time series data
 
 #### 📁 **rmsai_h5access.py** - HDF5 Data Access Utilities
 Comprehensive utilities for reading RMSAI HDF5 files:
@@ -582,12 +628,15 @@ Comprehensive utilities for reading RMSAI HDF5 files:
 - Usage examples and demonstrations
 
 #### ⚙️ **rmsai_lstm_autoencoder_proc.py** - Main Processing Engine
-The core real-time processing pipeline:
-- File monitoring and event detection
-- ECG chunk processing through LSTM autoencoder
-- Anomaly detection and scoring
-- Vector database storage (ChromaDB)
-- Metadata storage (SQLite)
+The core real-time processing pipeline with intelligent chunking:
+- Real-time file monitoring and event detection
+- **Sliding window ECG processing**: Splits 2400-sample ECG into 140-sample chunks with 50% overlap
+- LSTM autoencoder encoding/decoding (seq_len=140, embedding_dim=128)
+- Reconstruction-based anomaly detection and scoring
+- Vector database storage (ChromaDB) with 128-dimensional embeddings
+- Comprehensive metadata storage (SQLite) with pacer data support
+- Multi-lead processing (7 ECG leads) with parallel chunk analysis
+- Graceful error handling and model architecture auto-detection
 
 #### 🎲 **rmsai_sim_hdf5_data.py** - Data Generator
 Generates realistic synthetic ECG datasets:
@@ -604,8 +653,9 @@ rmsai-ecg-system/
 ├── vector_db/                      # ChromaDB storage
 ├── models/                         # Model storage (model.pth)
 ├── analytics_output/               # Analytics results
-├── rmsai_metadata.db              # SQLite database
+├── rmsai_metadata.db              # SQLite database (processing results, pacer data)
 ├── rmsai_processor.log            # Processing logs
+├── chroma.sqlite3                 # ChromaDB internal storage (auto-created)
 ├──
 ├── # Core System
 ├── rmsai_sim_hdf5_data.py         # HDF5 data generator
@@ -745,9 +795,15 @@ python tests/test_improvements.py api
 python tests/test_improvements.py analytics
 python tests/test_improvements.py thresholds
 python tests/test_improvements.py dashboard
+python tests/test_improvements.py pacer
+python tests/test_improvements.py processor
+python tests/test_improvements.py analysis
 
-# Test core processor
+# Test individual components
 python tests/test_processor.py
+python tests/test_dashboard_data.py
+python tests/test_dashboard_simple.py
+python tests/test_anomaly_alert.py
 
 # Verbose output
 python tests/test_improvements.py --verbose
@@ -759,6 +815,9 @@ The test suite validates:
 - ✅ **Advanced Analytics**: ML clustering, anomaly detection, visualization
 - ✅ **Adaptive Thresholds**: Statistical optimization, performance evaluation
 - ✅ **Monitoring Dashboard**: Data loading, visualization components
+- ✅ **Pacer Functionality**: HDF5 pacer data processing and analysis
+- ✅ **LSTM Processor**: 100% coverage chunking, model inference, database integration
+- ✅ **Analysis Tools**: Condition comparison, coverage optimization, chunking analysis
 - ✅ **Integration**: Component interaction and data flow
 
 #### Test Coverage
@@ -857,6 +916,265 @@ python rmsai_sim_hdf5_data.py 50 --mixed-conditions
 
 # Generate high-volume test dataset
 python rmsai_sim_hdf5_data.py 100 --stress-test
+```
+
+## Analysis Tools
+
+The `analysis/` directory contains specialized tools for ECG data analysis, coverage optimization, and system performance evaluation:
+
+### Coverage Analysis & Optimization
+
+#### Chunking Analysis Tool
+Analyze current chunking strategy and coverage:
+```bash
+# Basic chunking analysis
+python analysis/chunking_analysis.py
+
+# Show current coverage statistics
+python analysis/chunking_analysis.py --detailed
+```
+
+#### Full Coverage Analysis Tool
+Compare 80% vs 100% coverage scenarios:
+```bash
+# Run full coverage comparison
+python analysis/full_coverage_analysis.py
+
+# Export results to file
+python analysis/full_coverage_analysis.py --output coverage_report.json
+```
+
+#### Optimize Step Size Tool
+Calculate optimal step size for perfect coverage:
+```bash
+# Find optimal step size for 100% coverage
+python analysis/optimize_step_size.py
+
+# Shows chunk positions and gap analysis
+```
+
+#### Validate New Chunking Tool
+Validate new chunking parameters before implementation:
+```bash
+# Validate 100% coverage strategy
+python analysis/validate_new_chunking.py
+
+# Shows expected chunk positions and system impact
+```
+
+### Condition Analysis
+
+#### Condition Comparison Tool
+Compare input conditions vs predicted conditions:
+```bash
+# Generate condition comparison table
+python analysis/condition_comparison_tool.py
+
+# Export to CSV format
+python analysis/condition_comparison_tool.py --format csv --output conditions.csv
+
+# Show detailed analysis with accuracy metrics
+python analysis/condition_comparison_tool.py --format table --detailed --limit 20
+
+# Export to JSON
+python analysis/condition_comparison_tool.py --format json --output results.json
+```
+
+### Coverage Optimization Tool
+Advanced coverage optimization analysis:
+```bash
+# Run coverage optimization analysis
+python analysis/coverage_optimization.py
+
+# Generate optimization recommendations
+python analysis/coverage_optimization.py --recommendations
+```
+
+### Analysis Tool Usage Examples
+
+#### Quick System Analysis
+```bash
+# Run all analysis tools sequentially
+echo "=== CHUNKING ANALYSIS ===" && python analysis/chunking_analysis.py
+echo "=== COVERAGE OPTIMIZATION ===" && python analysis/full_coverage_analysis.py
+echo "=== CONDITION COMPARISON ===" && python analysis/condition_comparison_tool.py --limit 10
+echo "=== STEP SIZE OPTIMIZATION ===" && python analysis/optimize_step_size.py
+```
+
+#### Generate Analysis Reports
+```bash
+# Create comprehensive analysis report directory
+mkdir -p reports/$(date +%Y%m%d)
+
+# Generate all reports
+python analysis/condition_comparison_tool.py --format csv --output reports/$(date +%Y%m%d)/conditions.csv
+python analysis/full_coverage_analysis.py --output reports/$(date +%Y%m%d)/coverage_analysis.json
+python analysis/chunking_analysis.py > reports/$(date +%Y%m%d)/chunking_report.txt
+```
+
+#### Batch Analysis for Multiple Datasets
+```bash
+# Analyze multiple datasets
+for dataset in data/*.h5; do
+    echo "Analyzing $dataset..."
+    # Run analysis tools on specific dataset
+    python analysis/condition_comparison_tool.py --dataset "$dataset"
+done
+```
+
+### Analysis Tool Features
+
+- **Condition Comparison Tool**:
+  - Compare input vs predicted conditions
+  - Calculate accuracy metrics (precision, recall, F1-score)
+  - Support multiple output formats (table, CSV, JSON)
+  - Filtering by condition, lead, or time range
+
+- **Coverage Analysis Tools**:
+  - Calculate ECG coverage percentages
+  - Optimize chunking parameters for 100% coverage
+  - Analyze computational impact of different strategies
+  - Validate chunk positioning and gap detection
+
+- **Step Size Optimization**:
+  - Mathematical optimization for perfect coverage
+  - Trade-off analysis between coverage and computation
+  - Chunk positioning visualization
+  - Gap and overlap detection
+
+## Command-Line Demonstrations
+
+The system provides comprehensive command-line tools for demonstration and analysis without requiring dashboards:
+
+### System Status & Database Overview
+
+#### Database Analysis
+```bash
+# View database schema
+sqlite3 rmsai_metadata.db ".schema"
+
+# Count total records
+sqlite3 rmsai_metadata.db "SELECT 'Chunks: ' || COUNT(*) FROM chunks; SELECT 'Files: ' || COUNT(*) FROM processed_files;"
+
+# Processing statistics
+sqlite3 rmsai_metadata.db "
+SELECT 'Total Chunks: ' || COUNT(*) FROM chunks
+UNION ALL SELECT 'Anomalies: ' || COUNT(*) FROM chunks WHERE anomaly_status = 'anomaly'
+UNION ALL SELECT 'Avg Error Score: ' || ROUND(AVG(error_score), 4) FROM chunks;"
+```
+
+#### Condition Distribution
+```bash
+sqlite3 rmsai_metadata.db "
+SELECT
+    COALESCE(JSON_EXTRACT(metadata, '$.condition'), 'Unknown') as condition,
+    COUNT(*) as count
+FROM chunks
+GROUP BY JSON_EXTRACT(metadata, '$.condition')
+ORDER BY count DESC;"
+```
+
+### Vector Database Operations
+
+#### ChromaDB Status
+```bash
+python3 -c "
+import chromadb
+client = chromadb.PersistentClient(path='vector_db')
+collection = client.get_collection('rmsai_ecg_embeddings')
+print(f'Total embeddings: {collection.count()}')
+print(f'Collection name: {collection.name}')
+"
+```
+
+#### Similarity Search Demo
+```bash
+# Get a sample chunk ID and test similarity search
+CHUNK_ID=$(sqlite3 rmsai_metadata.db "SELECT chunk_id FROM chunks LIMIT 1;")
+curl -X POST http://localhost:8000/api/v1/search/similar \
+  -H "Content-Type: application/json" \
+  -d "{\"chunk_id\": \"$CHUNK_ID\", \"n_results\": 5}" | python3 -m json.tool
+```
+
+### API Server Demonstrations
+
+#### Start and Test API
+```bash
+# Start API server
+python api_server.py &
+sleep 3
+
+# Test endpoints
+curl -s http://localhost:8000/api/v1/stats | python3 -m json.tool
+curl -s "http://localhost:8000/api/v1/anomalies?limit=5" | python3 -m json.tool
+curl -s "http://localhost:8000/api/v1/conditions" | python3 -m json.tool
+```
+
+### Advanced Analytics Demonstrations
+
+#### Clustering Analysis
+```bash
+python3 -c "
+from advanced_analytics import EmbeddingAnalytics
+analytics = EmbeddingAnalytics('vector_db', 'rmsai_metadata.db')
+clusters = analytics.discover_embedding_clusters()
+if 'kmeans' in clusters:
+    print(f'K-means: {clusters[\"kmeans\"][\"n_clusters\"]} clusters')
+if 'dbscan' in clusters:
+    print(f'DBSCAN: {clusters[\"dbscan\"][\"n_clusters\"]} clusters')
+"
+```
+
+#### Anomaly Detection
+```bash
+python3 -c "
+from advanced_analytics import EmbeddingAnalytics
+analytics = EmbeddingAnalytics('vector_db', 'rmsai_metadata.db')
+anomalies = analytics.detect_anomalous_patterns(contamination=0.1)
+for method in ['isolation_forest', 'one_class_svm', 'local_outlier_factor']:
+    if method in anomalies:
+        print(f'{method}: {anomalies[method][\"n_anomalies\"]} anomalies')
+"
+```
+
+### One-Line Demo Commands
+
+#### Quick Health Check
+```bash
+sqlite3 rmsai_metadata.db "SELECT COUNT(*) || ' chunks, ' || ROUND(AVG(error_score), 3) || ' avg error' FROM chunks;"
+```
+
+#### Processing Rate
+```bash
+sqlite3 rmsai_metadata.db "SELECT ROUND(COUNT(*) / ((julianday(MAX(processing_timestamp)) - julianday(MIN(processing_timestamp))) * 24), 0) || ' chunks/hour' FROM chunks;"
+```
+
+#### Anomaly Rate
+```bash
+sqlite3 rmsai_metadata.db "SELECT ROUND(100.0 * COUNT(CASE WHEN anomaly_status='anomaly' THEN 1 END) / COUNT(*), 1) || '% anomaly rate' FROM chunks;"
+```
+
+### Complete Demo Script
+
+Create and run a comprehensive demo:
+```bash
+#!/bin/bash
+echo "=== RMSAI SYSTEM DEMONSTRATION ==="
+
+echo "1. System Overview:"
+sqlite3 rmsai_metadata.db "SELECT 'Processed: ' || COUNT(*) || ' chunks, ' || COUNT(DISTINCT event_id) || ' events' FROM chunks;"
+
+echo "2. Condition Distribution:"
+sqlite3 rmsai_metadata.db "SELECT JSON_EXTRACT(metadata, '$.condition') as condition, COUNT(*) FROM chunks GROUP BY condition ORDER BY COUNT(*) DESC;"
+
+echo "3. Processing Statistics:"
+sqlite3 rmsai_metadata.db "SELECT 'Avg Error: ' || ROUND(AVG(error_score), 4), 'Anomaly Rate: ' || ROUND(100.0 * SUM(CASE WHEN anomaly_status='anomaly' THEN 1 ELSE 0 END) / COUNT(*), 1) || '%' FROM chunks;"
+
+echo "4. Recent Activity:"
+sqlite3 rmsai_metadata.db "SELECT chunk_id, lead_name, ROUND(error_score, 3), processing_timestamp FROM chunks ORDER BY processing_timestamp DESC LIMIT 5;"
+
+echo "5. API Status (if running):"
+curl -s http://localhost:8000/api/v1/stats | python3 -c "import sys, json; data=json.load(sys.stdin); print(f'API: {data[\"total_chunks\"]} chunks')" 2>/dev/null || echo "API server not running"
 ```
 
 ## API Reference
@@ -1329,6 +1647,182 @@ curl -s http://localhost:8000/health | python -m json.tool
 echo "Dashboard: http://localhost:8501"
 echo "API Docs: http://localhost:8000/docs"
 ```
+
+## Troubleshooting
+
+### Common Issues and Solutions
+
+#### LSTM Processor Issues
+
+**1. Shape Mismatch Errors**
+```bash
+# Error: shape '[1, 140, 1]' is invalid for input of size 2400
+# Solution: Ensure chunking is properly configured
+
+# Check configuration:
+grep "seq_len.*=" rmsai_lstm_autoencoder_proc.py
+# Should show: seq_len = 140
+
+# Verify chunking logic is active:
+grep -A 5 "chunk_size.*=" rmsai_lstm_autoencoder_proc.py
+```
+
+**2. Embedding Dimension Mismatch**
+```bash
+# Error: Collection expecting embedding with dimension of 64, got 128
+# Solution: Delete ChromaDB and recreate with correct dimensions
+
+rm -rf vector_db/
+# Restart processor - ChromaDB will recreate with correct dimensions
+```
+
+**3. Model Loading Issues**
+```bash
+# Error: Model file not found: models/model.pth
+# Solution: Verify model path or create new model
+
+# Check if model exists:
+ls -la models/model.pth
+
+# Model will be created automatically if missing, but check logs for warnings
+tail -f rmsai_processor.log | grep -i model
+```
+
+#### Database Issues
+
+**4. SQLite Database Errors**
+```bash
+# Error: database is locked
+# Solution: Close any open connections
+
+# Check what's using the database:
+lsof rmsai_metadata.db
+
+# Verify database integrity:
+sqlite3 rmsai_metadata.db "PRAGMA integrity_check;"
+```
+
+**5. ChromaDB Collection Issues**
+```bash
+# Error: Collection does not exist
+# Solution: Allow auto-creation or manually create
+
+python -c "
+import chromadb
+client = chromadb.PersistentClient(path='vector_db')
+collection = client.get_or_create_collection('rmsai_ecg_embeddings')
+print(f'Collection count: {collection.count()}')
+"
+```
+
+#### Performance Issues
+
+**6. Slow Processing**
+```bash
+# Check chunk processing rate:
+sqlite3 rmsai_metadata.db "
+SELECT
+    source_file,
+    COUNT(*) as chunks,
+    COUNT(*) / 7 as events_processed
+FROM chunks
+GROUP BY source_file;"
+
+# Monitor real-time processing:
+tail -f rmsai_processor.log | grep "Processed.*chunks"
+```
+
+**7. Memory Issues**
+```bash
+# Monitor memory usage:
+ps aux | grep python | grep rmsai
+
+# Reduce chunking if memory constrained:
+# Edit rmsai_lstm_autoencoder_proc.py line ~665:
+# Change: if chunks_processed >= 10
+# To:     if chunks_processed >= 5
+```
+
+#### Data Validation
+
+**8. HDF5 File Issues**
+```bash
+# Validate HDF5 structure:
+python rmsai_h5access.py data/your_file.h5
+
+# Check for pacer data:
+python -c "
+import h5py
+with h5py.File('data/your_file.h5', 'r') as f:
+    event = f['event_1001']
+    print('Pacer info:', 'pacer_info' in event['ecg'])
+    print('Pacer offset:', 'pacer_offset' in event['ecg'])
+"
+```
+
+#### API and Dashboard Issues
+
+**9. API Server Not Starting**
+```bash
+# Check port availability:
+netstat -tulpn | grep :8000
+
+# Start with different port:
+uvicorn api_server:app --host 0.0.0.0 --port 8001
+
+# Check dependencies:
+pip install fastapi uvicorn chromadb
+```
+
+**10. Dashboard Connection Issues**
+```bash
+# Check Streamlit installation:
+pip install streamlit plotly
+
+# Start with debug mode:
+streamlit run dashboard.py --server.enableCORS false --server.enableXsrfProtection false
+```
+
+### Debug Mode
+
+**Enable Verbose Logging:**
+```python
+# In rmsai_lstm_autoencoder_proc.py, change line ~63:
+logging.basicConfig(level=logging.DEBUG)  # Instead of INFO
+```
+
+**Monitor Processing in Real-time:**
+```bash
+# Watch logs continuously:
+tail -f rmsai_processor.log
+
+# Monitor database updates:
+watch -n 5 'sqlite3 rmsai_metadata.db "SELECT COUNT(*) FROM chunks;"'
+
+# Check ChromaDB status:
+python -c "
+import chromadb
+client = chromadb.PersistentClient(path='vector_db')
+try:
+    collection = client.get_collection('rmsai_ecg_embeddings')
+    print(f'ChromaDB: {collection.count()} embeddings stored')
+except:
+    print('ChromaDB: No collection found')
+"
+```
+
+### Performance Benchmarks
+
+**Expected Processing Rates:**
+- **HDF5 Generation**: ~2-3 seconds per event
+- **LSTM Processing**: ~10-15 seconds per event (7 leads × 10 chunks)
+- **Database Storage**: ~1-2 seconds per event
+- **Total Pipeline**: ~15-20 seconds per event
+
+**System Requirements:**
+- **RAM**: 8GB minimum, 16GB recommended
+- **CPU**: Multi-core recommended for concurrent processing
+- **Storage**: 1GB per 1000 events (HDF5 + embeddings + metadata)
 
 ## File Compatibility
 

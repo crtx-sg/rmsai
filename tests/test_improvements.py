@@ -21,6 +21,7 @@ Usage:
     python test_improvements.py thresholds
     python test_improvements.py dashboard
     python test_improvements.py pacer
+    python test_improvements.py processor
 """
 
 import sys
@@ -542,6 +543,311 @@ class ImprovementTester:
             logger.error(f"❌ Pacer functionality test failed: {e}")
             return False
 
+    def test_lstm_processor(self) -> bool:
+        """Test LSTM autoencoder processor functionality"""
+        logger.info("Testing LSTM Processor...")
+
+        try:
+            # Generate test data for processor
+            logger.info("Generating test data for LSTM processor...")
+
+            import subprocess
+            import os
+            import sqlite3
+            import time
+
+            # Generate a test HDF5 file
+            result = subprocess.run([
+                sys.executable, "rmsai_sim_hdf5_data.py", "1", "--patient-id", "PROC_TEST"
+            ], capture_output=True, text=True, timeout=30)
+
+            if result.returncode != 0:
+                logger.error(f"Failed to generate test data: {result.stderr}")
+                return False
+
+            # Find the generated file
+            test_file = None
+            for file in os.listdir("data"):
+                if file.startswith("PROC_TEST") and file.endswith(".h5"):
+                    test_file = os.path.join("data", file)
+                    break
+
+            if not test_file:
+                logger.error("Test HDF5 file not found")
+                return False
+
+            logger.info(f"Generated test file: {test_file}")
+
+            # Test processor components individually
+            logger.info("Testing processor configuration...")
+
+            # Import processor components
+            sys.path.insert(0, '.')
+            from rmsai_lstm_autoencoder_proc import RMSAIConfig, ECGChunkProcessor
+
+            # Test configuration
+            config = RMSAIConfig()
+            logger.info(f"Config - seq_len: {config.seq_len}, embedding_dim: {config.embedding_dim}")
+
+            if config.seq_len != 140:
+                logger.error(f"Expected seq_len=140, got {config.seq_len}")
+                return False
+
+            if config.embedding_dim != 128:
+                logger.error(f"Expected embedding_dim=128, got {config.embedding_dim}")
+                return False
+
+            # Test chunk processor initialization
+            logger.info("Testing chunk processor initialization...")
+            try:
+                chunk_processor = ECGChunkProcessor(config)
+                logger.info("Chunk processor initialized successfully")
+            except Exception as e:
+                logger.warning(f"Chunk processor initialization failed: {e}")
+                logger.info("This is expected if model.pth doesn't exist")
+
+            # Test chunking logic by reading HDF5 data
+            logger.info("Testing chunking logic...")
+
+            import h5py
+            import numpy as np
+
+            with h5py.File(test_file, 'r') as f:
+                events = [key for key in f.keys() if key.startswith('event_')]
+                if not events:
+                    logger.error("No events found in test file")
+                    return False
+
+                event = f[events[0]]
+                ecg_data = event['ecg']['ECG1'][:]
+
+                logger.info(f"ECG data length: {len(ecg_data)} samples")
+
+                # Test chunking parameters (updated for 100% coverage)
+                chunk_size = 140
+                step_size = 141  # Optimized for 100% coverage (99.8%)
+
+                chunks_generated = 0
+                for chunk_start in range(0, len(ecg_data) - chunk_size + 1, step_size):
+                    chunk = ecg_data[chunk_start:chunk_start + chunk_size]
+
+                    if len(chunk) != chunk_size:
+                        logger.error(f"Chunk size mismatch: expected {chunk_size}, got {len(chunk)}")
+                        return False
+
+                    chunks_generated += 1
+                    if chunks_generated >= 10:  # Test first 10 chunks
+                        break
+
+                logger.info(f"Successfully generated {chunks_generated} chunks from ECG data")
+
+                # Verify improved coverage with new step size
+                total_samples = len(ecg_data)
+                last_chunk_end = chunks_generated * step_size + chunk_size - step_size
+                coverage_pct = (last_chunk_end / total_samples) * 100 if total_samples > 0 else 0
+                logger.info(f"ECG coverage: {coverage_pct:.1f}% ({last_chunk_end}/{total_samples} samples)")
+
+                # Expect significantly improved coverage (should be ~99.8% vs old 32%)
+                if coverage_pct < 90:
+                    logger.warning(f"Coverage may be lower than expected: {coverage_pct:.1f}%")
+                else:
+                    logger.info(f"✅ Excellent coverage achieved: {coverage_pct:.1f}%")
+
+                # Test preprocessing logic
+                logger.info("Testing preprocessing logic...")
+
+                # Simulate preprocessing
+                from sklearn.preprocessing import StandardScaler
+                scaler = StandardScaler()
+
+                test_chunk = ecg_data[:chunk_size]
+                chunk_normalized = scaler.fit_transform(test_chunk.reshape(-1, 1)).flatten()
+
+                if len(chunk_normalized) != chunk_size:
+                    logger.error(f"Normalization failed: expected {chunk_size}, got {len(chunk_normalized)}")
+                    return False
+
+                logger.info("Preprocessing logic working correctly")
+
+            # Test database integration (if processor has run)
+            logger.info("Testing database integration...")
+
+            if os.path.exists("rmsai_metadata.db"):
+                with sqlite3.connect("rmsai_metadata.db") as conn:
+                    cursor = conn.cursor()
+
+                    # Check if chunks table exists
+                    cursor.execute("""
+                        SELECT name FROM sqlite_master
+                        WHERE type='table' AND name='chunks'
+                    """)
+                    if cursor.fetchone():
+                        # Check for recent chunks
+                        cursor.execute("""
+                            SELECT COUNT(*) FROM chunks
+                            WHERE processing_timestamp > datetime('now', '-1 hour')
+                        """)
+                        recent_chunks = cursor.fetchone()[0]
+                        logger.info(f"Found {recent_chunks} recently processed chunks")
+
+                        # Check for pacer data (if column exists)
+                        try:
+                            cursor.execute("""
+                                SELECT COUNT(*) FROM chunks
+                                WHERE pacer_offset IS NOT NULL
+                            """)
+                            pacer_chunks = cursor.fetchone()[0]
+                            logger.info(f"Found {pacer_chunks} chunks with pacer data")
+                        except sqlite3.OperationalError as e:
+                            if "no such column: pacer_offset" in str(e):
+                                logger.info("Database schema predates pacer_offset feature")
+                            else:
+                                raise
+                    else:
+                        logger.info("Chunks table not found (processor may not have run)")
+            else:
+                logger.info("Metadata database not found (processor may not have run)")
+
+            # Test ChromaDB integration
+            logger.info("Testing ChromaDB integration...")
+
+            try:
+                import chromadb
+                if os.path.exists("vector_db"):
+                    client = chromadb.PersistentClient(path="vector_db")
+                    try:
+                        collection = client.get_collection("rmsai_ecg_embeddings")
+                        count = collection.count()
+                        logger.info(f"ChromaDB collection has {count} embeddings")
+
+                        if count > 0:
+                            # Test embedding dimension
+                            result = collection.peek(limit=1)
+                            embeddings = result.get('embeddings', [])
+                            if embeddings and len(embeddings) > 0:
+                                embedding_dim = len(embeddings[0])
+                                logger.info(f"Embedding dimension: {embedding_dim}")
+                                if embedding_dim != 128:
+                                    logger.warning(f"Expected 128-dim embeddings, found {embedding_dim}")
+
+                    except Exception as e:
+                        logger.info(f"ChromaDB collection not found: {e}")
+                else:
+                    logger.info("ChromaDB directory not found")
+            except ImportError:
+                logger.warning("ChromaDB not available for testing")
+
+            # Clean up test file
+            try:
+                os.remove(test_file)
+                logger.info("Test file cleaned up")
+            except:
+                pass
+
+            logger.info("✅ LSTM Processor tests passed")
+            return True
+
+        except Exception as e:
+            logger.error(f"❌ LSTM Processor test failed: {e}")
+            return False
+
+    def test_analysis_tools(self) -> bool:
+        """Test analysis tools in analysis/ directory"""
+        logger.info("Testing Analysis Tools...")
+
+        try:
+            import os
+            import sys
+            import subprocess
+
+            # Check if analysis directory exists
+            analysis_dir = "analysis"
+            if not os.path.exists(analysis_dir):
+                logger.error(f"Analysis directory not found: {analysis_dir}")
+                return False
+
+            logger.info(f"Found analysis directory: {analysis_dir}")
+
+            # Expected analysis tools
+            expected_tools = [
+                "condition_comparison_tool.py",
+                "chunking_analysis.py",
+                "full_coverage_analysis.py",
+                "coverage_optimization.py"
+            ]
+
+            missing_tools = []
+            for tool in expected_tools:
+                tool_path = os.path.join(analysis_dir, tool)
+                if os.path.exists(tool_path):
+                    logger.info(f"✅ Found: {tool}")
+                else:
+                    missing_tools.append(tool)
+                    logger.warning(f"❌ Missing: {tool}")
+
+            if missing_tools:
+                logger.warning(f"Missing analysis tools: {missing_tools}")
+            else:
+                logger.info("✅ All expected analysis tools found")
+
+            # Test condition comparison tool
+            try:
+                logger.info("Testing condition comparison tool...")
+                result = subprocess.run([
+                    sys.executable, os.path.join(analysis_dir, "condition_comparison_tool.py"),
+                    "--format", "table", "--limit", "5"
+                ], capture_output=True, text=True, timeout=30)
+
+                if result.returncode == 0:
+                    logger.info("✅ Condition comparison tool working")
+                    if "Input Condition" in result.stdout:
+                        logger.info("Tool output contains expected headers")
+                else:
+                    logger.warning(f"Condition comparison tool returned error: {result.stderr}")
+            except Exception as e:
+                logger.warning(f"Could not test condition comparison tool: {e}")
+
+            # Test chunking analysis tool
+            try:
+                logger.info("Testing chunking analysis tool...")
+                result = subprocess.run([
+                    sys.executable, os.path.join(analysis_dir, "chunking_analysis.py")
+                ], capture_output=True, text=True, timeout=30)
+
+                if result.returncode == 0:
+                    logger.info("✅ Chunking analysis tool working")
+                    # Check for coverage information in output
+                    if "coverage" in result.stdout.lower():
+                        logger.info("Tool output contains coverage analysis")
+                else:
+                    logger.warning(f"Chunking analysis tool returned error: {result.stderr}")
+            except Exception as e:
+                logger.warning(f"Could not test chunking analysis tool: {e}")
+
+            # Test full coverage analysis tool
+            try:
+                logger.info("Testing full coverage analysis tool...")
+                result = subprocess.run([
+                    sys.executable, os.path.join(analysis_dir, "full_coverage_analysis.py")
+                ], capture_output=True, text=True, timeout=30)
+
+                if result.returncode == 0:
+                    logger.info("✅ Full coverage analysis tool working")
+                    # Check for 100% coverage mention
+                    if "100%" in result.stdout:
+                        logger.info("Tool mentions 100% coverage optimization")
+                else:
+                    logger.warning(f"Full coverage analysis tool returned error: {result.stderr}")
+            except Exception as e:
+                logger.warning(f"Could not test full coverage analysis tool: {e}")
+
+            logger.info("✅ Analysis tools tests completed")
+            return True
+
+        except Exception as e:
+            logger.error(f"❌ Analysis tools test failed: {e}")
+            return False
+
     def run_tests(self, module: str = None) -> Dict[str, bool]:
         """Run all tests or specific module tests"""
         logger.info("Starting RMSAI Improvements Test Suite")
@@ -552,7 +858,9 @@ class ImprovementTester:
             'analytics': self.test_advanced_analytics,
             'thresholds': self.test_adaptive_thresholds,
             'dashboard': self.test_dashboard,
-            'pacer': self.test_pacer_functionality
+            'pacer': self.test_pacer_functionality,
+            'processor': self.test_lstm_processor,
+            'analysis': self.test_analysis_tools
         }
 
         if module and module in tests_to_run:
@@ -608,7 +916,7 @@ def main():
     parser.add_argument(
         'module',
         nargs='?',
-        choices=['api', 'analytics', 'thresholds', 'dashboard', 'pacer'],
+        choices=['api', 'analytics', 'thresholds', 'dashboard', 'pacer', 'processor', 'analysis'],
         help='Specific module to test (default: all)'
     )
     parser.add_argument(

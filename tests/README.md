@@ -5,12 +5,14 @@ This directory contains comprehensive tests for the RMSAI Enhanced ECG Anomaly D
 ## Test Files
 
 ### `test_improvements.py`
-**Comprehensive test suite for all four enhancement modules:**
+**Comprehensive test suite for all enhancement modules:**
 
 - ✅ **API Server Tests**: REST endpoints, WebSocket connectivity, health checks
 - ✅ **Advanced Analytics Tests**: ML clustering, anomaly detection, visualization
 - ✅ **Adaptive Thresholds Tests**: Statistical optimization, performance evaluation
 - ✅ **Monitoring Dashboard Tests**: Data loading, visualization components
+- ✅ **Pacer Functionality Tests**: HDF5 pacer data validation, analysis functions
+- ✅ **LSTM Processor Tests**: Chunking logic, configuration validation, database integration
 - ✅ **Integration Tests**: Component interaction and data flow
 
 #### Usage:
@@ -23,6 +25,8 @@ python tests/test_improvements.py api
 python tests/test_improvements.py analytics
 python tests/test_improvements.py thresholds
 python tests/test_improvements.py dashboard
+python tests/test_improvements.py pacer
+python tests/test_improvements.py processor
 
 # Verbose output
 python tests/test_improvements.py --verbose

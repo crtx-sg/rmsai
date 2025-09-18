@@ -380,13 +380,17 @@ async def search_similar_embeddings(search: SimilaritySearch):
     try:
         _, collection = get_vector_db()
 
-        # Get the reference embedding
+        # Get the reference embedding (add vec_ prefix as used in vector database)
+        vector_id = f"vec_{search.chunk_id}"
         reference = collection.get(
-            ids=[search.chunk_id],
+            ids=[vector_id],
             include=['embeddings', 'metadatas'] if search.include_metadata else ['embeddings']
         )
 
-        if not reference['embeddings']:
+        if (reference['embeddings'] is None or
+            len(reference['embeddings']) == 0 or
+            reference['embeddings'][0] is None or
+            len(reference['embeddings'][0]) == 0):
             raise HTTPException(status_code=404, detail=f"Chunk {search.chunk_id} not found")
 
         # Search for similar embeddings
@@ -397,7 +401,21 @@ async def search_similar_embeddings(search: SimilaritySearch):
         )
 
         similar_chunks = []
-        for i, chunk_id in enumerate(results['ids'][0]):
+
+        # Check if results contain any data
+        if ('ids' not in results or results['ids'] is None or
+            len(results['ids']) == 0 or results['ids'][0] is None or
+            len(results['ids'][0]) == 0):
+            return {
+                "reference_chunk": search.chunk_id,
+                "similar_chunks": [],
+                "total_found": 0
+            }
+
+        for i, vector_chunk_id in enumerate(results['ids'][0]):
+            # Remove vec_ prefix to get the actual chunk_id
+            chunk_id = vector_chunk_id.replace("vec_", "") if vector_chunk_id.startswith("vec_") else vector_chunk_id
+
             if chunk_id != search.chunk_id:  # Exclude self
                 distance = results['distances'][0][i]
                 similarity_score = max(0, 1 - distance)  # Convert distance to similarity
