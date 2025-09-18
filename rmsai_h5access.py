@@ -49,6 +49,7 @@ def print_file_info(hdf5_file: str) -> None:
                 print(f"  Patient ID: {patient_id}")
             print(f"  ECG sampling rate: {metadata['sampling_rate_ecg'][()]} Hz")
             print(f"  PPG sampling rate: {metadata['sampling_rate_ppg'][()]} Hz")
+            print(f"  Respiratory sampling rate: {metadata['sampling_rate_resp'][()]} Hz")
             print(f"  Pre-event duration: {metadata['seconds_before_event'][()]} seconds")
             print(f"  Post-event duration: {metadata['seconds_after_event'][()]} seconds")
             print(f"  Data quality score: {metadata['data_quality_score'][()]:.3f}")
@@ -122,10 +123,39 @@ def demonstrate_basic_access(hdf5_file: str) -> None:
                 print(f"    {lead}: {len(signal)} samples, "
                       f"range: {signal.min():.3f} to {signal.max():.3f} mV")
 
+        # Access pacer information with comprehensive analysis
+        pacer_data = analyze_pacer_data(first_event)
+        if 'info' in pacer_data:
+            info = pacer_data['info']
+            print(f"\n  Pacer Information: 0x{info['raw_value']:08X}")
+            print(f"    Type: {info['type']} ({info['type_name']})")
+            if info['type'] > 0:
+                print(f"    Rate: {info['rate']} bpm")
+                print(f"    Amplitude: {info['amplitude']}")
+                print(f"    Status flags: 0x{info['status_flags']:02X}")
+
+        if 'timing' in pacer_data:
+            timing = pacer_data['timing']
+            print(f"\n  Pacer Timing:")
+            print(f"    Offset: {timing['offset_samples']} samples ({timing['offset_seconds']:.3f} seconds)")
+            print(f"    Position: {timing['window_percent']:.1f}% through ECG window ({timing['timing_category']} timing)")
+
+        if 'signal_analysis' in pacer_data:
+            signal = pacer_data['signal_analysis']
+            print(f"    Signal at pacer spike: {signal['pacer_amplitude_at_spike']:.3f} mV")
+            if signal['pre_pacer_avg'] is not None and signal['post_pacer_avg'] is not None:
+                spike_magnitude = abs(signal['pacer_amplitude_at_spike'] - signal['pre_pacer_avg'])
+                print(f"    Spike magnitude: {spike_magnitude:.3f} mV")
+
         # Access PPG signal
         ppg_signal = first_event['ppg']['PPG'][:]
         print(f"\n  PPG Signal: {len(ppg_signal)} samples, "
               f"range: {ppg_signal.min():.3f} to {ppg_signal.max():.3f} mV")
+
+        # Access Respiratory signal
+        resp_signal = first_event['resp']['RESP'][:]
+        print(f"\n  Respiratory Signal: {len(resp_signal)} samples, "
+              f"range: {resp_signal.min():.1f} to {resp_signal.max():.1f}")
 
         # Access vital signs
         print(f"\n  Vital Signs:")
@@ -140,6 +170,86 @@ def demonstrate_basic_access(hdf5_file: str) -> None:
 
                 print(f"    {vital_name}: {value} {units} at {vital_datetime}")
 
+                # Show thresholds for all vitals except XL_Posture
+                if vital_name != 'XL_Posture':
+                    if 'upper_threshold' in vital_group and 'lower_threshold' in vital_group:
+                        upper_threshold = vital_group['upper_threshold'][()]
+                        lower_threshold = vital_group['lower_threshold'][()]
+                        print(f"      Thresholds: {lower_threshold} - {upper_threshold} {units}")
+                else:
+                    # Show special attributes for XL_Posture
+                    if 'step_count' in vital_group:
+                        step_count = vital_group['step_count'][()]
+                        print(f"      Step count: {step_count}")
+                    if 'time_since_posture_change' in vital_group:
+                        time_since_change = vital_group['time_since_posture_change'][()]
+                        print(f"      Time since posture change: {time_since_change} seconds ({time_since_change//60} minutes)")
+
+def analyze_pacer_data(event_group: h5py.Group) -> Dict[str, Any]:
+    """Comprehensive analysis of pacer information and timing."""
+    pacer_data = {}
+
+    ecg_group = event_group['ecg']
+
+    # Extract pacer information
+    if 'pacer_info' in ecg_group:
+        pacer_info = ecg_group['pacer_info'][()]
+
+        # Decode bit-packed information
+        pacer_type = pacer_info & 0xFF
+        pacer_rate = (pacer_info >> 8) & 0xFF
+        pacer_amplitude = (pacer_info >> 16) & 0xFF
+        status_flags = (pacer_info >> 24) & 0xFF
+
+        pacer_data['info'] = {
+            'raw_value': pacer_info,
+            'type': pacer_type,
+            'type_name': ['None', 'Single', 'Dual', 'Biventricular'][min(pacer_type, 3)],
+            'rate': pacer_rate if pacer_type > 0 else None,
+            'amplitude': pacer_amplitude if pacer_type > 0 else None,
+            'status_flags': status_flags if pacer_type > 0 else None
+        }
+
+    # Extract pacer timing
+    if 'pacer_offset' in ecg_group:
+        pacer_offset = ecg_group['pacer_offset'][()]
+        time_offset = pacer_offset / 200.0  # Convert to seconds (200 Hz ECG)
+
+        # Analyze timing characteristics
+        window_percent = (pacer_offset / 2400.0) * 100  # Percentage through 12-second window
+
+        if window_percent <= 25:
+            timing_category = "Early"
+        elif window_percent >= 75:
+            timing_category = "Late"
+        else:
+            timing_category = "Mid"
+
+        pacer_data['timing'] = {
+            'offset_samples': pacer_offset,
+            'offset_seconds': time_offset,
+            'window_percent': window_percent,
+            'timing_category': timing_category,
+            'max_samples': 2400
+        }
+
+    # Extract ECG signal at pacer location for analysis
+    if 'pacer_offset' in ecg_group and 'ECG1' in ecg_group:
+        ecg_signal = ecg_group['ECG1'][:]
+        if pacer_offset < len(ecg_signal):
+            # Get signal values around pacer spike
+            start_idx = max(0, pacer_offset - 10)
+            end_idx = min(len(ecg_signal), pacer_offset + 10)
+
+            pacer_data['signal_analysis'] = {
+                'pacer_amplitude_at_spike': ecg_signal[pacer_offset],
+                'surrounding_signal': ecg_signal[start_idx:end_idx],
+                'pre_pacer_avg': ecg_signal[start_idx:pacer_offset].mean() if pacer_offset > start_idx else None,
+                'post_pacer_avg': ecg_signal[pacer_offset+1:end_idx].mean() if pacer_offset+1 < end_idx else None
+            }
+
+    return pacer_data
+
 def extract_vitals_from_event(event_group: h5py.Group) -> Dict[str, Any]:
     """Extract all vital signs from an event group."""
     vitals = {}
@@ -148,12 +258,27 @@ def extract_vitals_from_event(event_group: h5py.Group) -> Dict[str, Any]:
     for vital_name in vital_names:
         if vital_name in event_group['vitals']:
             vital_group = event_group['vitals'][vital_name]
-            vitals[vital_name] = {
+            vital_data = {
                 'value': vital_group['value'][()],
                 'units': vital_group['units'][()].decode(),
                 'timestamp': vital_group['timestamp'][()],
                 'datetime': datetime.fromtimestamp(vital_group['timestamp'][()])
             }
+
+            # Add thresholds for all vitals except XL_Posture
+            if vital_name != 'XL_Posture':
+                if 'upper_threshold' in vital_group:
+                    vital_data['upper_threshold'] = vital_group['upper_threshold'][()]
+                if 'lower_threshold' in vital_group:
+                    vital_data['lower_threshold'] = vital_group['lower_threshold'][()]
+            else:
+                # Add special attributes for XL_Posture
+                if 'step_count' in vital_group:
+                    vital_data['step_count'] = vital_group['step_count'][()]
+                if 'time_since_posture_change' in vital_group:
+                    vital_data['time_since_posture_change'] = vital_group['time_since_posture_change'][()]
+
+            vitals[vital_name] = vital_data
 
     return vitals
 
@@ -363,9 +488,9 @@ def validate_file_structure(hdf5_file: str) -> bool:
 
             metadata = f['metadata']
             required_metadata = [
-                'patient_id', 'sampling_rate_ecg', 'sampling_rate_ppg', 'alarm_time_epoch',
-                'alarm_offset_seconds', 'seconds_before_event', 'seconds_after_event',
-                'data_quality_score', 'device_info'
+                'patient_id', 'sampling_rate_ecg', 'sampling_rate_ppg', 'sampling_rate_resp',
+                'alarm_time_epoch', 'alarm_offset_seconds', 'seconds_before_event',
+                'seconds_after_event', 'data_quality_score', 'device_info'
             ]
 
             for field in required_metadata:
@@ -388,7 +513,7 @@ def validate_file_structure(hdf5_file: str) -> bool:
                 event = f[event_key]
 
                 # Check required groups
-                required_groups = ['ecg', 'ppg', 'vitals']
+                required_groups = ['ecg', 'ppg', 'resp', 'vitals']
                 for group in required_groups:
                     if group not in event:
                         print(f"❌ Missing {group} group in {event_key}")
@@ -405,6 +530,18 @@ def validate_file_structure(hdf5_file: str) -> bool:
                     if lead not in event['ecg']:
                         print(f"❌ Missing ECG lead {lead} in {event_key}")
                         return False
+
+                # Check pacer info (optional)
+                if 'pacer_info' in event['ecg']:
+                    print(f"✓ Pacer info found in {event_key}")
+
+                if 'pacer_offset' in event['ecg']:
+                    print(f"✓ Pacer offset found in {event_key}")
+
+                # Check respiratory signal (required)
+                if 'RESP' not in event['resp']:
+                    print(f"❌ Missing RESP signal in {event_key}")
+                    return False
 
                 # Check PPG
                 if 'PPG' not in event['ppg']:

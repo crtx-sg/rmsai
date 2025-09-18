@@ -10,7 +10,7 @@ import os
 # --- Configuration Constants ---
 FS_ECG = 200.0          # ECG sampling frequency in Hz
 FS_PPG = 75.0           # PPG sampling frequency in Hz
-FS_IMPEDANCE = 33.33    # Impedance sampling frequency in Hz
+FS_RESP = 33.33         # Respiratory waveform sampling frequency in Hz (was impedance)
 FS_VITALS = 8.33        # Vitals sampling frequency in Hz
 ECG_DURATION = 12       # Duration of ECG signal in seconds
 DATA_PACKET_INTERVAL = 0.12  # Data packet interval in seconds
@@ -89,6 +89,97 @@ def generate_synthetic_beat(hr, fs=FS_ECG, qrs_dur=0.04, condition='Normal'):
 
     return beat
 
+def generate_pacer_info(condition):
+    """Generate pacer information as 4-byte integer."""
+    # Pacer information encoded as bit flags:
+    # Bit 0-7: Pacer type (0=None, 1=Single, 2=Dual, 3=Biventricular)
+    # Bit 8-15: Pacer rate (if applicable)
+    # Bit 16-23: Pacer amplitude (arbitrary units)
+    # Bit 24-31: Status flags
+
+    if 'Ventricular Tachycardia' in condition:
+        # Higher chance of having a pacer
+        pacer_type = random.choices([0, 1, 2, 3], weights=[0.6, 0.1, 0.2, 0.1])[0]
+    elif condition == 'Bradycardia':
+        # Very high chance of having a pacer
+        pacer_type = random.choices([0, 1, 2, 3], weights=[0.2, 0.3, 0.4, 0.1])[0]
+    else:
+        # Low chance of having a pacer
+        pacer_type = random.choices([0, 1, 2, 3], weights=[0.95, 0.02, 0.02, 0.01])[0]
+
+    if pacer_type == 0:
+        return 0  # No pacer
+
+    # Generate pacer parameters
+    pacer_rate = random.randint(60, 100) if pacer_type > 0 else 0
+    pacer_amplitude = random.randint(1, 10) if pacer_type > 0 else 0
+    status_flags = random.randint(0, 15) if pacer_type > 0 else 0
+
+    # Pack into 32-bit integer
+    pacer_info = (pacer_type & 0xFF) | \
+                 ((pacer_rate & 0xFF) << 8) | \
+                 ((pacer_amplitude & 0xFF) << 16) | \
+                 ((status_flags & 0xFF) << 24)
+
+    return int(pacer_info)
+
+def generate_pacer_offset(condition):
+    """Generate pacer offset as integer (samples from start of ECG window)."""
+    # Pacer offset represents the sample number where pacer spike occurs
+    # in the ECG window (0 to ECG_DURATION * FS_ECG samples)
+
+    max_samples = int(ECG_DURATION * FS_ECG)  # 2400 samples for 12 seconds at 200 Hz
+
+    if 'Ventricular Tachycardia' in condition or condition == 'Bradycardia':
+        # For arrhythmias, pacer might be more strategically timed
+        # Place offset in first or last quarter of the window
+        if random.random() < 0.5:
+            # Early pacing
+            offset = random.randint(int(max_samples * 0.1), int(max_samples * 0.25))
+        else:
+            # Late pacing
+            offset = random.randint(int(max_samples * 0.75), int(max_samples * 0.9))
+    else:
+        # For normal conditions, pacer can occur anywhere in the window
+        offset = random.randint(int(max_samples * 0.2), int(max_samples * 0.8))
+
+    return int(offset)
+
+def generate_respiratory_waveform(hr, condition, duration=ECG_DURATION, fs=FS_RESP):
+    """Generate respiratory waveform signal."""
+    num_samples_total = int(duration * fs)
+
+    # Base respiratory rate based on condition
+    if 'Ventricular Tachycardia' in condition:
+        resp_rate = random.uniform(22, 30)  # Elevated due to distress
+    elif 'Atrial Fibrillation' in condition:
+        resp_rate = random.uniform(18, 25)  # Slightly elevated
+    elif condition == 'Bradycardia':
+        resp_rate = random.uniform(12, 18)  # Normal to slightly low
+    else:
+        resp_rate = random.uniform(12, 20)  # Normal range
+
+    # Generate time array
+    t = np.linspace(0, duration, num_samples_total, endpoint=False)
+
+    # Base respiratory waveform (sinusoidal)
+    resp_freq = resp_rate / 60.0  # Convert to Hz
+    respiratory = np.sin(2 * np.pi * resp_freq * t)
+
+    # Add cardiac influence (slight modulation from heart rate)
+    cardiac_freq = hr / 60.0
+    cardiac_influence = 0.1 * np.sin(2 * np.pi * cardiac_freq * t)
+    respiratory += cardiac_influence
+
+    # Add breathing variability and noise
+    respiratory += 0.05 * np.sin(2 * np.pi * resp_freq * 0.1 * t)  # Low frequency variation
+    respiratory += 0.02 * np.random.normal(0, 1, num_samples_total)  # Noise
+
+    # Scale to realistic amplitude range
+    respiratory = respiratory * 1000 + random.uniform(8000, 12000)  # Offset around 10000
+
+    return respiratory.astype(np.float32)
+
 def generate_ecg_lead(hr, condition, duration=ECG_DURATION, fs=FS_ECG, lead_type='I'):
     """Generate ECG waveform for a specific lead."""
     num_samples_total = int(duration * fs)
@@ -163,7 +254,7 @@ def generate_ppg_signal(hr, condition, duration=ECG_DURATION, fs=FS_PPG):
 
     return (ppg_wave + noise + baseline) * 100  # Convert to mV scale
 
-def generate_impedance_signals(hr, condition, duration=ECG_DURATION, fs=FS_IMPEDANCE):
+def generate_impedance_signals(hr, condition, duration=ECG_DURATION, fs=FS_RESP):
     """Generate thoracic impedance and respiration signals."""
     num_samples_total = int(duration * fs)
     t = np.linspace(0, duration, num_samples_total, endpoint=False)
@@ -196,7 +287,7 @@ def generate_impedance_signals(hr, condition, duration=ECG_DURATION, fs=FS_IMPED
     return impedance, respiration
 
 def generate_vitals_single(hr, condition, event_timestamp):
-    """Generate single vital sign values with individual timestamps."""
+    """Generate single vital sign values with individual timestamps and thresholds."""
     # Generate base vitals
     pulse_rate = hr + random.uniform(-2, 2)  # PPG-derived pulse rate
     spo2_base = random.uniform(96, 99.5)
@@ -222,8 +313,10 @@ def generate_vitals_single(hr, condition, event_timestamp):
         spo2_base = random.uniform(88, 95)  # Lower SpO2 due to poor perfusion
         resp_rate_base = random.uniform(22, 30)  # Elevated respiratory rate due to distress
 
-    # Posture angle (random but stable)
+    # Posture angle and activity data
     posture_base = random.uniform(-10, 45)  # degrees
+    step_count = random.randint(0, 5000)  # Steps since last measurement
+    time_since_posture_change = random.randint(60, 3600)  # 1 minute to 1 hour
 
     # Generate epoch timestamp for event
     event_epoch = time.mktime(event_timestamp.timetuple()) + event_timestamp.microsecond / 1e6
@@ -245,42 +338,58 @@ def generate_vitals_single(hr, condition, event_timestamp):
         'HR': {
             'value': int(round(hr)),
             'units': 'bpm',
-            'timestamp': event_epoch + base_time_offsets['HR']
+            'timestamp': event_epoch + base_time_offsets['HR'],
+            'upper_threshold': 100,  # Standard HR upper limit
+            'lower_threshold': 60    # Standard HR lower limit
         },
         'Pulse': {
             'value': int(round(pulse_rate)),
             'units': 'bpm',
-            'timestamp': event_epoch + base_time_offsets['Pulse']
+            'timestamp': event_epoch + base_time_offsets['Pulse'],
+            'upper_threshold': 100,  # Standard pulse upper limit
+            'lower_threshold': 60    # Standard pulse lower limit
         },
         'SpO2': {
             'value': int(round(spo2_base)),
             'units': '%',
-            'timestamp': event_epoch + base_time_offsets['SpO2']
+            'timestamp': event_epoch + base_time_offsets['SpO2'],
+            'upper_threshold': 100,  # SpO2 upper limit (100%)
+            'lower_threshold': 90    # SpO2 lower critical limit
         },
         'Systolic': {
             'value': int(round(systolic)),
             'units': 'mmHg',
-            'timestamp': event_epoch + base_time_offsets['Systolic']
+            'timestamp': event_epoch + base_time_offsets['Systolic'],
+            'upper_threshold': 140,  # Hypertension threshold
+            'lower_threshold': 90    # Hypotension threshold
         },
         'Diastolic': {
             'value': int(round(diastolic)),
             'units': 'mmHg',
-            'timestamp': event_epoch + base_time_offsets['Diastolic']
+            'timestamp': event_epoch + base_time_offsets['Diastolic'],
+            'upper_threshold': 90,   # Diastolic hypertension threshold
+            'lower_threshold': 60    # Diastolic hypotension threshold
         },
         'RespRate': {
             'value': int(round(resp_rate_base)),
             'units': 'breaths/min',
-            'timestamp': event_epoch + base_time_offsets['RespRate']
+            'timestamp': event_epoch + base_time_offsets['RespRate'],
+            'upper_threshold': 20,   # Tachypnea threshold
+            'lower_threshold': 12    # Bradypnea threshold
         },
         'Temp': {
             'value': round(temp_base, 1),
             'units': '°F',
-            'timestamp': event_epoch + base_time_offsets['Temp']
+            'timestamp': event_epoch + base_time_offsets['Temp'],
+            'upper_threshold': 100.4,  # Fever threshold (°F)
+            'lower_threshold': 96.0    # Hypothermia threshold (°F)
         },
         'XL_Posture': {
             'value': int(round(posture_base)),
             'units': 'degrees',
-            'timestamp': event_epoch + base_time_offsets['XL_Posture']
+            'timestamp': event_epoch + base_time_offsets['XL_Posture'],
+            'step_count': step_count,  # Steps since last measurement
+            'time_since_posture_change': time_since_posture_change  # Seconds since last posture change
         }
     }
 
@@ -349,6 +458,7 @@ def create_metadata_group(hf, patient_id, event_timestamps):
     # Sampling rates
     metadata_group.create_dataset('sampling_rate_ecg', data=FS_ECG)
     metadata_group.create_dataset('sampling_rate_ppg', data=FS_PPG)
+    metadata_group.create_dataset('sampling_rate_resp', data=FS_RESP)
 
     # Alarm timing (use first event as reference)
     alarm_time = event_timestamps[0]
@@ -381,7 +491,7 @@ def create_event_group(hf, event_id, condition, hr, event_timestamp):
     ecg_aVF = generate_ecg_lead(hr, condition, lead_type='aVF')
     ecg_vVX = generate_ecg_lead(hr, condition, lead_type='vVX')
 
-    # ECG group
+    # ECG group with pacer info
     ecg_group = event_group.create_group('ecg')
     ecg_group.create_dataset('ECG1', data=ecg_lead_I, compression='gzip')
     ecg_group.create_dataset('ECG2', data=ecg_lead_II, compression='gzip')
@@ -391,12 +501,25 @@ def create_event_group(hf, event_id, condition, hr, event_timestamp):
     ecg_group.create_dataset('aVF', data=ecg_aVF, compression='gzip')
     ecg_group.create_dataset('vVX', data=ecg_vVX, compression='gzip')
 
+    # Add pacer information as 4-byte integer
+    pacer_info = generate_pacer_info(condition)
+    ecg_group.create_dataset('pacer_info', data=pacer_info, dtype=np.int32)
+
+    # Add pacer offset as integer (sample number within ECG window)
+    pacer_offset = generate_pacer_offset(condition)
+    ecg_group.create_dataset('pacer_offset', data=pacer_offset, dtype=np.int32)
+
     # PPG group
     ppg_signal = generate_ppg_signal(hr, condition)
     ppg_group = event_group.create_group('ppg')
     ppg_group.create_dataset('PPG', data=ppg_signal, compression='gzip')
 
-    # Vitals group (single values with units and timestamps)
+    # Respiratory group
+    resp_signal = generate_respiratory_waveform(hr, condition)
+    resp_group = event_group.create_group('resp')
+    resp_group.create_dataset('RESP', data=resp_signal, compression='gzip')
+
+    # Vitals group (single values with units, timestamps, and thresholds)
     vitals_data = generate_vitals_single(hr, condition, event_timestamp)
     vitals_group = event_group.create_group('vitals')
     for vital_name, vital_info in vitals_data.items():
@@ -404,6 +527,15 @@ def create_event_group(hf, event_id, condition, hr, event_timestamp):
         vital_subgroup.create_dataset('value', data=vital_info['value'])
         vital_subgroup.create_dataset('units', data=vital_info['units'].encode('utf-8'))
         vital_subgroup.create_dataset('timestamp', data=vital_info['timestamp'])
+
+        # Add thresholds for all vitals except XL_Posture
+        if vital_name != 'XL_Posture':
+            vital_subgroup.create_dataset('upper_threshold', data=vital_info['upper_threshold'])
+            vital_subgroup.create_dataset('lower_threshold', data=vital_info['lower_threshold'])
+        else:
+            # Add special attributes for XL_Posture
+            vital_subgroup.create_dataset('step_count', data=vital_info['step_count'])
+            vital_subgroup.create_dataset('time_since_posture_change', data=vital_info['time_since_posture_change'])
 
     # Convert event timestamp to epoch
     event_epoch = time.mktime(event_timestamp.timetuple()) + event_timestamp.microsecond / 1e6

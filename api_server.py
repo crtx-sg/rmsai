@@ -593,6 +593,180 @@ async def get_leads():
         logger.error(f"Error getting leads: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/api/v1/pacer-analysis")
+async def get_pacer_analysis():
+    """Get comprehensive pacer pattern analysis across all data"""
+    try:
+        with get_db_connection() as conn:
+            # Check if pacer data is available
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT COUNT(*) as pacer_count
+                FROM chunks
+                WHERE pacer_type IS NOT NULL
+                AND pacer_offset IS NOT NULL
+                AND processing_timestamp > datetime('now', '-30 days')
+            """)
+            pacer_count = cursor.fetchone()[0]
+
+            if pacer_count == 0:
+                return {
+                    "message": "No pacer data available",
+                    "pacer_data_available": False,
+                    "total_chunks_analyzed": 0
+                }
+
+            # Get pacer distribution
+            cursor.execute("""
+                SELECT pacer_type, COUNT(*) as count
+                FROM chunks
+                WHERE pacer_type IS NOT NULL
+                AND processing_timestamp > datetime('now', '-30 days')
+                GROUP BY pacer_type
+                ORDER BY count DESC
+            """)
+            pacer_type_dist = dict(cursor.fetchall())
+
+            # Get pacer timing analysis
+            cursor.execute("""
+                SELECT pacer_offset, anomaly_status, anomaly_type, error_score
+                FROM chunks
+                WHERE pacer_offset IS NOT NULL
+                AND processing_timestamp > datetime('now', '-30 days')
+            """)
+            timing_data = cursor.fetchall()
+
+            timing_analysis = {}
+            if timing_data:
+                import numpy as np
+                offsets = [row[0] for row in timing_data]
+
+                # Convert to timing categories
+                timing_categories = []
+                for offset in offsets:
+                    percent = (offset / 2400.0) * 100
+                    if percent <= 25:
+                        timing_categories.append("Early")
+                    elif percent >= 75:
+                        timing_categories.append("Late")
+                    else:
+                        timing_categories.append("Mid")
+
+                from collections import Counter
+                timing_dist = dict(Counter(timing_categories))
+
+                timing_analysis = {
+                    "timing_distribution": timing_dist,
+                    "offset_statistics": {
+                        "mean_samples": round(np.mean(offsets), 2),
+                        "std_samples": round(np.std(offsets), 2),
+                        "min_samples": min(offsets),
+                        "max_samples": max(offsets),
+                        "mean_seconds": round(np.mean(offsets) / 200.0, 3),
+                        "std_seconds": round(np.std(offsets) / 200.0, 3)
+                    }
+                }
+
+            # Get pacer by condition analysis
+            cursor.execute("""
+                SELECT anomaly_type, pacer_type, COUNT(*) as count,
+                       AVG(error_score) as avg_error_score
+                FROM chunks
+                WHERE pacer_type IS NOT NULL
+                AND anomaly_type IS NOT NULL
+                AND processing_timestamp > datetime('now', '-30 days')
+                GROUP BY anomaly_type, pacer_type
+                ORDER BY anomaly_type, pacer_type
+            """)
+            condition_pacer_data = cursor.fetchall()
+
+            pacer_by_condition = {}
+            for condition, pacer_type, count, avg_error in condition_pacer_data:
+                if condition not in pacer_by_condition:
+                    pacer_by_condition[condition] = {}
+
+                pacer_type_name = ['None', 'Single', 'Dual', 'Biventricular'][min(int(pacer_type), 3)]
+                pacer_by_condition[condition][f"pacer_type_{pacer_type}"] = {
+                    "name": pacer_type_name,
+                    "count": count,
+                    "avg_error_score": round(avg_error, 4) if avg_error else 0.0
+                }
+
+            return {
+                "pacer_data_available": True,
+                "total_chunks_with_pacer_data": pacer_count,
+                "analysis_timestamp": datetime.now().isoformat(),
+                "pacer_type_distribution": {
+                    "counts": pacer_type_dist,
+                    "percentages": {
+                        str(k): round(v / pacer_count * 100, 2)
+                        for k, v in pacer_type_dist.items()
+                    }
+                },
+                "timing_analysis": timing_analysis,
+                "pacer_by_condition": pacer_by_condition
+            }
+
+    except Exception as e:
+        logger.error(f"Error in pacer analysis: {e}")
+        raise HTTPException(status_code=500, detail=f"Pacer analysis failed: {str(e)}")
+
+@app.get("/api/v1/analytics/pacer-patterns")
+async def get_advanced_pacer_analytics():
+    """Get advanced pacer pattern analytics using the analytics module"""
+    try:
+        # Import analytics module
+        from advanced_analytics import EmbeddingAnalytics
+
+        analytics = EmbeddingAnalytics("vector_db", DB_PATH)
+        pacer_analysis = analytics.analyze_pacer_patterns()
+
+        return {
+            "analysis_type": "advanced_pacer_patterns",
+            "timestamp": datetime.now().isoformat(),
+            "results": pacer_analysis
+        }
+
+    except ImportError:
+        raise HTTPException(
+            status_code=500,
+            detail="Advanced analytics module not available"
+        )
+    except Exception as e:
+        logger.error(f"Error in advanced pacer analytics: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Advanced pacer analytics failed: {str(e)}"
+        )
+
+@app.get("/api/v1/thresholds/pacer-impact")
+async def get_pacer_threshold_impact():
+    """Get pacer impact analysis on threshold optimization"""
+    try:
+        # Import adaptive thresholds module
+        from adaptive_thresholds import AdaptiveThresholdManager
+
+        threshold_manager = AdaptiveThresholdManager(DB_PATH)
+        pacer_impact = threshold_manager.analyze_pacer_impact_on_thresholds()
+
+        return {
+            "analysis_type": "pacer_threshold_impact",
+            "timestamp": datetime.now().isoformat(),
+            "results": pacer_impact
+        }
+
+    except ImportError:
+        raise HTTPException(
+            status_code=500,
+            detail="Adaptive thresholds module not available"
+        )
+    except Exception as e:
+        logger.error(f"Error in pacer threshold impact analysis: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Pacer threshold impact analysis failed: {str(e)}"
+        )
+
 # WebSocket endpoint for real-time updates
 @app.websocket("/ws/live-updates")
 async def websocket_endpoint(websocket: WebSocket):

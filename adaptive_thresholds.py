@@ -605,6 +605,162 @@ class AdaptiveThresholdManager:
             self.load_initial_thresholds()
             logger.info("Reset all thresholds to initial values")
 
+    def analyze_pacer_impact_on_thresholds(self) -> Dict[str, Any]:
+        """Analyze how pacer information affects optimal thresholds"""
+        logger.info("Analyzing pacer impact on threshold optimization...")
+
+        try:
+            with sqlite3.connect(self.sqlite_db_path) as conn:
+                # Query data with pacer information if available
+                query = """
+                    SELECT error_score, anomaly_status, anomaly_type,
+                           pacer_type, pacer_offset, condition
+                    FROM chunks
+                    WHERE processing_timestamp > datetime('now', '-30 days')
+                    AND error_score IS NOT NULL
+                    AND anomaly_status IS NOT NULL
+                """
+                df = pd.read_sql_query(query, conn)
+
+            if df.empty:
+                logger.warning("No data available for pacer impact analysis")
+                return {"error": "No data available"}
+
+            results = {
+                'total_samples': len(df),
+                'pacer_data_available': 'pacer_type' in df.columns and df['pacer_type'].notna().any(),
+                'analysis_timestamp': datetime.now().isoformat()
+            }
+
+            if not results['pacer_data_available']:
+                logger.warning("No pacer information found in database")
+                return {**results, "warning": "No pacer data available for analysis"}
+
+            # Clean data
+            df['condition_clean'] = df['anomaly_type'].fillna('Unknown')
+            df['pacer_type'] = df['pacer_type'].fillna(0)  # 0 = No pacer
+
+            # Analyze threshold differences by pacer type
+            pacer_threshold_analysis = {}
+
+            for condition in df['condition_clean'].unique():
+                condition_data = df[df['condition_clean'] == condition]
+
+                if len(condition_data) < 20:  # Need sufficient samples
+                    continue
+
+                pacer_analysis = {}
+
+                for pacer_type in condition_data['pacer_type'].unique():
+                    pacer_subset = condition_data[condition_data['pacer_type'] == pacer_type]
+
+                    if len(pacer_subset) < 10:  # Need minimum samples per pacer type
+                        continue
+
+                    # Calculate optimal threshold for this pacer type
+                    y_true = (pacer_subset['anomaly_status'] == 'anomaly').astype(int)
+                    error_scores = pacer_subset['error_score'].values
+
+                    if len(np.unique(y_true)) < 2:  # Need both classes
+                        continue
+
+                    # Find optimal threshold using ROC curve
+                    try:
+                        from sklearn.metrics import roc_curve
+                        fpr, tpr, thresholds = roc_curve(y_true, error_scores)
+
+                        # Find threshold that maximizes (TPR - FPR)
+                        optimal_idx = np.argmax(tpr - fpr)
+                        optimal_threshold = thresholds[optimal_idx]
+
+                        # Calculate performance metrics
+                        y_pred = (error_scores > optimal_threshold).astype(int)
+
+                        from sklearn.metrics import precision_recall_fscore_support, accuracy_score
+                        precision, recall, f1, _ = precision_recall_fscore_support(y_true, y_pred, average='binary', zero_division=0)
+                        accuracy = accuracy_score(y_true, y_pred)
+
+                        pacer_type_name = ['None', 'Single', 'Dual', 'Biventricular'][min(int(pacer_type), 3)]
+
+                        pacer_analysis[f'pacer_type_{int(pacer_type)}'] = {
+                            'pacer_name': pacer_type_name,
+                            'sample_count': len(pacer_subset),
+                            'optimal_threshold': round(optimal_threshold, 4),
+                            'f1_score': round(f1, 4),
+                            'precision': round(precision, 4),
+                            'recall': round(recall, 4),
+                            'accuracy': round(accuracy, 4),
+                            'error_score_stats': {
+                                'mean': round(error_scores.mean(), 4),
+                                'std': round(error_scores.std(), 4),
+                                'median': round(np.median(error_scores), 4)
+                            }
+                        }
+
+                    except Exception as e:
+                        logger.warning(f"Error calculating threshold for {condition} with pacer {pacer_type}: {e}")
+                        continue
+
+                if pacer_analysis:
+                    pacer_threshold_analysis[condition] = pacer_analysis
+
+                    # Calculate threshold variance across pacer types
+                    thresholds = [data['optimal_threshold'] for data in pacer_analysis.values()]
+                    if len(thresholds) > 1:
+                        pacer_threshold_analysis[condition]['threshold_variance'] = {
+                            'min_threshold': round(min(thresholds), 4),
+                            'max_threshold': round(max(thresholds), 4),
+                            'std_threshold': round(np.std(thresholds), 4),
+                            'coefficient_of_variation': round(np.std(thresholds) / np.mean(thresholds), 4)
+                        }
+
+            results['pacer_threshold_analysis'] = pacer_threshold_analysis
+
+            # Analyze pacer timing impact if available
+            if 'pacer_offset' in df.columns and df['pacer_offset'].notna().any():
+                timing_analysis = {}
+
+                for condition in df['condition_clean'].unique():
+                    condition_data = df[df['condition_clean'] == condition]
+                    condition_data = condition_data[condition_data['pacer_offset'].notna()]
+
+                    if len(condition_data) < 20:
+                        continue
+
+                    # Convert offset to timing categories
+                    condition_data['timing_category'] = condition_data['pacer_offset'].apply(
+                        lambda x: 'Early' if x / 2400 <= 0.25 else ('Late' if x / 2400 >= 0.75 else 'Mid')
+                    )
+
+                    timing_category_analysis = {}
+
+                    for timing_cat in condition_data['timing_category'].unique():
+                        timing_subset = condition_data[condition_data['timing_category'] == timing_cat]
+
+                        if len(timing_subset) < 10:
+                            continue
+
+                        # Calculate performance for this timing category
+                        error_scores = timing_subset['error_score'].values
+                        timing_category_analysis[timing_cat] = {
+                            'sample_count': len(timing_subset),
+                            'error_score_mean': round(error_scores.mean(), 4),
+                            'error_score_std': round(error_scores.std(), 4),
+                            'anomaly_rate': round((timing_subset['anomaly_status'] == 'anomaly').mean(), 4)
+                        }
+
+                    if timing_category_analysis:
+                        timing_analysis[condition] = timing_category_analysis
+
+                results['pacer_timing_analysis'] = timing_analysis
+
+            logger.info(f"Pacer impact analysis completed for {len(pacer_threshold_analysis)} conditions")
+            return results
+
+        except Exception as e:
+            logger.error(f"Error in pacer impact analysis: {e}")
+            return {"error": f"Pacer impact analysis failed: {str(e)}"}
+
     def export_threshold_config(self, filepath: str):
         """Export current threshold configuration to JSON file"""
         try:

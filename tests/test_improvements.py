@@ -20,6 +20,7 @@ Usage:
     python test_improvements.py analytics
     python test_improvements.py thresholds
     python test_improvements.py dashboard
+    python test_improvements.py pacer
 """
 
 import sys
@@ -110,6 +111,37 @@ class ImprovementTester:
             response = requests.get("http://localhost:8000/docs", timeout=5)
             if response.status_code == 200:
                 logger.info("API documentation accessible")
+
+            # Test pacer analysis endpoints
+            response = requests.get("http://localhost:8000/api/v1/pacer-analysis", timeout=10)
+            if response.status_code == 200:
+                pacer_data = response.json()
+                logger.info(f"Pacer analysis endpoint working: {pacer_data.get('pacer_data_available', False)}")
+                if pacer_data.get('pacer_data_available'):
+                    logger.info(f"  - Found {pacer_data.get('total_chunks_with_pacer_data', 0)} chunks with pacer data")
+                    logger.info(f"  - Pacer types: {list(pacer_data.get('pacer_type_distribution', {}).get('counts', {}).keys())}")
+            else:
+                logger.warning("Pacer analysis endpoint returned error (expected if no pacer data)")
+
+            # Test advanced pacer analytics endpoint
+            response = requests.get("http://localhost:8000/api/v1/analytics/pacer-patterns", timeout=10)
+            if response.status_code == 200:
+                pacer_analytics = response.json()
+                logger.info("Advanced pacer analytics endpoint working")
+                if 'results' in pacer_analytics and 'total_chunks_analyzed' in pacer_analytics['results']:
+                    logger.info(f"  - Analyzed {pacer_analytics['results']['total_chunks_analyzed']} chunks")
+            else:
+                logger.warning("Advanced pacer analytics endpoint not available")
+
+            # Test pacer threshold impact endpoint
+            response = requests.get("http://localhost:8000/api/v1/thresholds/pacer-impact", timeout=10)
+            if response.status_code == 200:
+                threshold_impact = response.json()
+                logger.info("Pacer threshold impact endpoint working")
+                if 'results' in threshold_impact and 'total_samples' in threshold_impact['results']:
+                    logger.info(f"  - Analyzed {threshold_impact['results']['total_samples']} samples")
+            else:
+                logger.warning("Pacer threshold impact endpoint not available")
 
             logger.info("✅ API Server tests passed")
             return True
@@ -379,6 +411,137 @@ class ImprovementTester:
             except Exception as e:
                 logger.warning(f"Could not clean up {file_path}: {e}")
 
+    def test_pacer_functionality(self) -> bool:
+        """Test pacer_info and pacer_offset functionality in HDF5 files"""
+        logger.info("Testing Pacer Functionality...")
+
+        try:
+            # Generate a test HDF5 file with pacer data
+            logger.info("Generating test HDF5 file with pacer data...")
+
+            import subprocess
+            import os
+
+            # Generate a small test file
+            result = subprocess.run([
+                sys.executable, "rmsai_sim_hdf5_data.py", "2", "--patient-id", "TEST_PACER"
+            ], capture_output=True, text=True, timeout=30)
+
+            if result.returncode != 0:
+                logger.error(f"Failed to generate test HDF5 file: {result.stderr}")
+                return False
+
+            # Find the generated file
+            test_file = None
+            for file in os.listdir("data"):
+                if file.startswith("TEST_PACER") and file.endswith(".h5"):
+                    test_file = os.path.join("data", file)
+                    break
+
+            if not test_file:
+                logger.error("Test HDF5 file not found")
+                return False
+
+            logger.info(f"Generated test file: {test_file}")
+
+            # Test HDF5 access with pacer data
+            logger.info("Testing HDF5 access with pacer analysis...")
+
+            # Import the h5access module to test pacer functionality
+            sys.path.insert(0, '.')
+            from rmsai_h5access import analyze_pacer_data
+
+            import h5py
+
+            # Open the test file and validate pacer data
+            with h5py.File(test_file, 'r') as f:
+                events = [key for key in f.keys() if key.startswith('event_')]
+
+                if not events:
+                    logger.error("No events found in test file")
+                    return False
+
+                first_event = f[events[0]]
+
+                # Test pacer_info presence
+                if 'pacer_info' not in first_event['ecg']:
+                    logger.error("pacer_info not found in ECG data")
+                    return False
+
+                pacer_info = first_event['ecg']['pacer_info'][()]
+                logger.info(f"Found pacer_info: 0x{pacer_info:08X}")
+
+                # Test pacer_offset presence
+                if 'pacer_offset' not in first_event['ecg']:
+                    logger.error("pacer_offset not found in ECG data")
+                    return False
+
+                pacer_offset = first_event['ecg']['pacer_offset'][()]
+                logger.info(f"Found pacer_offset: {pacer_offset} samples")
+
+                # Validate pacer_offset range
+                if not (0 <= pacer_offset <= 2400):
+                    logger.error(f"pacer_offset out of valid range: {pacer_offset}")
+                    return False
+
+                # Test comprehensive pacer analysis
+                pacer_data = analyze_pacer_data(first_event)
+
+                if 'info' not in pacer_data:
+                    logger.error("Pacer info analysis failed")
+                    return False
+
+                if 'timing' not in pacer_data:
+                    logger.error("Pacer timing analysis failed")
+                    return False
+
+                pacer_type = pacer_data['info']['type']
+                timing_category = pacer_data['timing']['timing_category']
+                time_offset = pacer_data['timing']['offset_seconds']
+
+                logger.info(f"Pacer analysis results:")
+                logger.info(f"  - Type: {pacer_type} ({pacer_data['info']['type_name']})")
+                logger.info(f"  - Timing: {timing_category} ({time_offset:.3f}s)")
+
+                if 'signal_analysis' in pacer_data:
+                    signal_at_spike = pacer_data['signal_analysis']['pacer_amplitude_at_spike']
+                    logger.info(f"  - Signal at pacer spike: {signal_at_spike:.3f} mV")
+
+            # Test file structure validation
+            logger.info("Testing file structure validation...")
+            result = subprocess.run([
+                sys.executable, "rmsai_h5access.py", test_file
+            ], capture_output=True, text=True, timeout=30)
+
+            if result.returncode != 0:
+                logger.error(f"H5 access validation failed: {result.stderr}")
+                return False
+
+            # Check if pacer data is mentioned in the output
+            if "Pacer Information" not in result.stdout:
+                logger.error("Pacer information not displayed in h5access output")
+                return False
+
+            if "Pacer Timing" not in result.stdout:
+                logger.error("Pacer timing not displayed in h5access output")
+                return False
+
+            logger.info("Pacer data correctly displayed in h5access output")
+
+            # Clean up test file
+            try:
+                os.remove(test_file)
+                logger.info("Test file cleaned up")
+            except:
+                pass
+
+            logger.info("✅ Pacer functionality tests passed")
+            return True
+
+        except Exception as e:
+            logger.error(f"❌ Pacer functionality test failed: {e}")
+            return False
+
     def run_tests(self, module: str = None) -> Dict[str, bool]:
         """Run all tests or specific module tests"""
         logger.info("Starting RMSAI Improvements Test Suite")
@@ -388,7 +551,8 @@ class ImprovementTester:
             'api': self.test_api_server,
             'analytics': self.test_advanced_analytics,
             'thresholds': self.test_adaptive_thresholds,
-            'dashboard': self.test_dashboard
+            'dashboard': self.test_dashboard,
+            'pacer': self.test_pacer_functionality
         }
 
         if module and module in tests_to_run:
@@ -444,7 +608,7 @@ def main():
     parser.add_argument(
         'module',
         nargs='?',
-        choices=['api', 'analytics', 'thresholds', 'dashboard'],
+        choices=['api', 'analytics', 'thresholds', 'dashboard', 'pacer'],
         help='Specific module to test (default: all)'
     )
     parser.add_argument(

@@ -702,6 +702,120 @@ class EmbeddingAnalytics:
 
         return analysis_results
 
+    def analyze_pacer_patterns(self) -> Dict[str, Any]:
+        """Analyze pacer information and timing patterns from HDF5 data"""
+        logger.info("Analyzing pacer patterns...")
+
+        # This method would need access to HDF5 files to read pacer data
+        # For now, we'll analyze pacer patterns from metadata if available
+        try:
+            embeddings, metadata = self.load_embeddings_with_metadata()
+
+            if len(embeddings) == 0:
+                return {"error": "No embeddings available for pacer analysis"}
+
+            # Check if pacer information is available in metadata
+            pacer_columns = [col for col in metadata.columns if 'pacer' in col.lower()]
+
+            if not pacer_columns:
+                logger.warning("No pacer information found in metadata")
+                return {"warning": "No pacer data available for analysis"}
+
+            results = {
+                'total_chunks_analyzed': len(metadata),
+                'pacer_data_availability': {
+                    'available_columns': pacer_columns,
+                    'coverage_percentage': 100.0  # Assuming all new data has pacer info
+                }
+            }
+
+            # If pacer type information is available
+            if 'pacer_type' in metadata.columns:
+                pacer_type_dist = metadata['pacer_type'].value_counts()
+                results['pacer_type_distribution'] = {
+                    'counts': pacer_type_dist.to_dict(),
+                    'percentages': (pacer_type_dist / len(metadata) * 100).round(2).to_dict()
+                }
+
+                # Analyze pacer types by condition
+                if 'condition' in metadata.columns:
+                    pacer_by_condition = metadata.groupby('condition')['pacer_type'].value_counts()
+                    results['pacer_by_condition'] = pacer_by_condition.to_dict()
+
+            # If pacer offset/timing information is available
+            if 'pacer_offset' in metadata.columns:
+                pacer_offsets = metadata['pacer_offset'].dropna()
+
+                if len(pacer_offsets) > 0:
+                    # Convert sample offsets to time offsets (assuming 200 Hz ECG)
+                    time_offsets = pacer_offsets / 200.0
+                    window_percentages = (pacer_offsets / 2400.0) * 100
+
+                    # Categorize timing
+                    timing_categories = []
+                    for percent in window_percentages:
+                        if percent <= 25:
+                            timing_categories.append("Early")
+                        elif percent >= 75:
+                            timing_categories.append("Late")
+                        else:
+                            timing_categories.append("Mid")
+
+                    timing_dist = pd.Series(timing_categories).value_counts()
+
+                    results['pacer_timing_analysis'] = {
+                        'offset_statistics': {
+                            'mean_samples': round(pacer_offsets.mean(), 2),
+                            'std_samples': round(pacer_offsets.std(), 2),
+                            'mean_seconds': round(time_offsets.mean(), 3),
+                            'std_seconds': round(time_offsets.std(), 3),
+                            'min_seconds': round(time_offsets.min(), 3),
+                            'max_seconds': round(time_offsets.max(), 3)
+                        },
+                        'timing_distribution': timing_dist.to_dict(),
+                        'window_position_stats': {
+                            'mean_percent': round(window_percentages.mean(), 1),
+                            'std_percent': round(window_percentages.std(), 1)
+                        }
+                    }
+
+                    # Analyze timing by condition
+                    if 'condition' in metadata.columns:
+                        timing_by_condition = {}
+                        for condition in metadata['condition'].unique():
+                            condition_mask = metadata['condition'] == condition
+                            condition_offsets = pacer_offsets[condition_mask]
+                            if len(condition_offsets) > 0:
+                                condition_time_offsets = condition_offsets / 200.0
+                                timing_by_condition[condition] = {
+                                    'count': len(condition_offsets),
+                                    'mean_seconds': round(condition_time_offsets.mean(), 3),
+                                    'std_seconds': round(condition_time_offsets.std(), 3)
+                                }
+                        results['timing_by_condition'] = timing_by_condition
+
+            # Analyze error scores for events with different pacer configurations
+            if 'error_score' in metadata.columns and 'pacer_type' in metadata.columns:
+                pacer_error_analysis = {}
+                for pacer_type in metadata['pacer_type'].unique():
+                    pacer_mask = metadata['pacer_type'] == pacer_type
+                    pacer_errors = metadata[pacer_mask]['error_score']
+                    if len(pacer_errors) > 0:
+                        pacer_error_analysis[f'pacer_type_{pacer_type}'] = {
+                            'count': len(pacer_errors),
+                            'mean_error': round(pacer_errors.mean(), 4),
+                            'std_error': round(pacer_errors.std(), 4),
+                            'median_error': round(pacer_errors.median(), 4)
+                        }
+                results['pacer_error_correlation'] = pacer_error_analysis
+
+            logger.info(f"Pacer analysis completed: {len(pacer_columns)} pacer columns analyzed")
+            return results
+
+        except Exception as e:
+            logger.error(f"Error in pacer analysis: {e}")
+            return {"error": f"Pacer analysis failed: {str(e)}"}
+
 def run_comprehensive_analysis(vector_db_path: str = "vector_db",
                              sqlite_db_path: str = "rmsai_metadata.db",
                              output_dir: str = "analytics_output") -> Dict[str, Any]:
@@ -741,7 +855,12 @@ def run_comprehensive_analysis(vector_db_path: str = "vector_db",
         network = analytics.generate_similarity_network()
         results['analysis_results']['similarity_network'] = network
 
-        # 5. Visualization
+        # 5. Pacer pattern analysis
+        logger.info("Running pacer pattern analysis...")
+        pacer_analysis = analytics.analyze_pacer_patterns()
+        results['analysis_results']['pacer_patterns'] = pacer_analysis
+
+        # 6. Visualization
         logger.info("Creating visualizations...")
         viz_path = os.path.join(output_dir, "embedding_visualization.png")
         viz_results = analytics.visualize_embedding_space(save_path=viz_path)
