@@ -26,6 +26,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
+
+# Import processor config
+try:
+    from rmsai_lstm_autoencoder_proc import RMSAIConfig
+    PROCESSOR_CONFIG_AVAILABLE = True
+except ImportError:
+    PROCESSOR_CONFIG_AVAILABLE = False
+    logger.warning("Processor configuration not available")
 import sqlite3
 import asyncio
 from datetime import datetime, timedelta
@@ -63,6 +71,11 @@ logger = logging.getLogger(__name__)
 DB_PATH = "rmsai_metadata.db"
 VECTOR_DB_PATH = "vector_db"
 
+# Global processor configuration cache
+_processor_config = None
+_config_cache_time = None
+CONFIG_CACHE_DURATION = 60  # seconds
+
 # Pydantic models
 class AnomalyQuery(BaseModel):
     start_time: Optional[str] = None
@@ -89,6 +102,12 @@ class ProcessingStats(BaseModel):
     leads_processed: Dict[str, int]
     last_updated: str
     uptime_hours: float
+    selected_leads: List[str]
+    total_available_leads: int
+    performance_impact: Dict[str, Any]
+
+class LeadConfigUpdate(BaseModel):
+    selected_leads: List[str]
 
 class ChunkDetail(BaseModel):
     chunk_id: str
@@ -172,6 +191,61 @@ def get_vector_db():
     except Exception as e:
         logger.error(f"Vector database error: {e}")
         raise HTTPException(status_code=500, detail="Vector database connection failed")
+
+def get_processor_config():
+    """Get current processor configuration with caching"""
+    global _processor_config, _config_cache_time
+
+    current_time = datetime.now()
+    if (_processor_config and _config_cache_time and
+        (current_time - _config_cache_time).total_seconds() < CONFIG_CACHE_DURATION):
+        return _processor_config
+
+    if PROCESSOR_CONFIG_AVAILABLE:
+        try:
+            config = RMSAIConfig()
+            _processor_config = {
+                'selected_leads': config.selected_leads,
+                'available_leads': config.available_leads,
+                'chunking_config': {
+                    'chunk_size': config.chunk_size,
+                    'step_size': config.step_size,
+                    'max_chunks_per_lead': config.max_chunks_per_lead
+                },
+                'performance_estimates': config.get_performance_estimate()
+            }
+            _config_cache_time = current_time
+            return _processor_config
+        except Exception as e:
+            logger.error(f"Error getting processor config: {e}")
+
+    # Fallback: get from database
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT DISTINCT lead_name FROM chunks ORDER BY lead_name")
+            available_leads = [row[0] for row in cursor.fetchall()]
+
+        _processor_config = {
+            'selected_leads': available_leads,
+            'available_leads': available_leads,
+            'chunking_config': {
+                'chunk_size': 140,
+                'step_size': 70,
+                'max_chunks_per_lead': 33
+            },
+            'performance_estimates': {
+                'selected_leads': len(available_leads),
+                'max_chunks_per_lead': 33,
+                'chunks_per_event': len(available_leads) * 33,
+                'coverage_percentage': 99.2
+            }
+        }
+        _config_cache_time = current_time
+        return _processor_config
+    except Exception as e:
+        logger.error(f"Error getting fallback config: {e}")
+        return None
 
 # API Endpoints
 
@@ -272,6 +346,11 @@ async def get_processing_stats():
 
             anomaly_rate = (total_anomalies / total_chunks * 100) if total_chunks > 0 else 0
 
+            # Get processor configuration
+            config = get_processor_config()
+            selected_leads = config['selected_leads'] if config else list(leads_processed.keys())
+            performance_impact = config['performance_estimates'] if config else {}
+
             stats = ProcessingStats(
                 total_chunks=total_chunks,
                 total_anomalies=total_anomalies,
@@ -281,7 +360,10 @@ async def get_processing_stats():
                 conditions_detected=conditions_detected,
                 leads_processed=leads_processed,
                 last_updated=now.isoformat(),
-                uptime_hours=round(uptime_hours, 2)
+                uptime_hours=round(uptime_hours, 2),
+                selected_leads=selected_leads,
+                total_available_leads=len(leads_processed),
+                performance_impact=performance_impact
             )
 
             # Cache the result
@@ -609,6 +691,77 @@ async def get_leads():
 
     except Exception as e:
         logger.error(f"Error getting leads: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/v1/config/leads")
+async def get_lead_configuration():
+    """Get current lead configuration and performance estimates"""
+    try:
+        config = get_processor_config()
+        if not config:
+            raise HTTPException(status_code=500, detail="Could not retrieve processor configuration")
+
+        return {
+            "selected_leads": config['selected_leads'],
+            "available_leads": config['available_leads'],
+            "chunking_config": config['chunking_config'],
+            "performance_estimates": config['performance_estimates'],
+            "timestamp": datetime.now().isoformat()
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting lead configuration: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/v1/config/leads")
+async def update_lead_configuration(config_update: LeadConfigUpdate):
+    """Update lead configuration (Note: requires processor restart to take effect)"""
+    try:
+        # Validate leads exist in database
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT DISTINCT lead_name FROM chunks")
+            available_leads = [row[0] for row in cursor.fetchall()]
+
+        invalid_leads = [lead for lead in config_update.selected_leads if lead not in available_leads]
+        if invalid_leads:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid leads: {invalid_leads}. Available leads: {available_leads}"
+            )
+
+        # Calculate performance impact
+        current_config = get_processor_config()
+        if current_config:
+            current_chunks_per_event = len(current_config['selected_leads']) * current_config['chunking_config']['max_chunks_per_lead']
+            new_chunks_per_event = len(config_update.selected_leads) * current_config['chunking_config']['max_chunks_per_lead']
+            performance_change = ((current_chunks_per_event - new_chunks_per_event) / current_chunks_per_event) * 100
+        else:
+            performance_change = 0
+
+        # Note: This endpoint provides information but doesn't actually update the running processor
+        # The processor configuration would need to be updated separately
+
+        return {
+            "message": "Lead configuration validated successfully",
+            "note": "Processor restart required to apply changes",
+            "requested_leads": config_update.selected_leads,
+            "performance_impact": {
+                "chunks_per_event_change": new_chunks_per_event - current_chunks_per_event if current_config else 0,
+                "performance_improvement_percent": round(performance_change, 1) if current_config else 0
+            },
+            "validation": {
+                "valid": True,
+                "available_leads": available_leads,
+                "invalid_leads": invalid_leads
+            },
+            "timestamp": datetime.now().isoformat()
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating lead configuration: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/v1/pacer-analysis")

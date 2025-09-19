@@ -87,7 +87,9 @@ class RMSAIConfig:
         self.embedding_dim = 128  # Match actual model output
 
         # ECG leads configuration
-        self.ecg_leads = ['ECG1', 'ECG2', 'ECG3', 'aVR', 'aVL', 'aVF', 'vVX']
+        self.available_leads = ['ECG1', 'ECG2', 'ECG3', 'aVR', 'aVL', 'aVF', 'vVX']
+        # Default to all leads, but can be configured to process subset
+        self.selected_leads = self.available_leads.copy()  # Process all by default
 
         # Anomaly detection thresholds
         self.anomaly_threshold = 0.1  # Base threshold for MSE
@@ -104,8 +106,34 @@ class RMSAIConfig:
         self.max_queue_size = 100
         self.processing_threads = 2
 
+        # Chunking configuration (aligned with chunking_analysis.py)
+        self.ecg_samples_per_event = 2400  # 12 seconds at 200Hz
+        self.chunk_size = self.seq_len  # 140 samples
+        self.step_size = self.chunk_size // 2  # 70 samples (50% overlap)
+        self.max_chunks_per_lead = (self.ecg_samples_per_event - self.chunk_size) // self.step_size + 1  # 33 chunks
+
         # Create directories
         self.create_directories()
+
+    def set_selected_leads(self, leads: List[str]):
+        """Configure which ECG leads to process"""
+        invalid_leads = [lead for lead in leads if lead not in self.available_leads]
+        if invalid_leads:
+            raise ValueError(f"Invalid leads: {invalid_leads}. Available leads: {self.available_leads}")
+
+        self.selected_leads = leads
+        logger.info(f"Selected leads for processing: {self.selected_leads}")
+
+    def get_performance_estimate(self) -> Dict[str, int]:
+        """Get performance estimates based on current configuration"""
+        chunks_per_event = len(self.selected_leads) * self.max_chunks_per_lead
+
+        return {
+            "selected_leads": len(self.selected_leads),
+            "max_chunks_per_lead": self.max_chunks_per_lead,
+            "chunks_per_event": chunks_per_event,
+            "coverage_percentage": round(((self.max_chunks_per_lead - 1) * self.step_size + self.chunk_size) / self.ecg_samples_per_event * 100, 1)
+        }
 
     def create_directories(self):
         """Create necessary directories"""
@@ -637,8 +665,8 @@ class HDF5FileProcessor:
 
             ecg_group = event['ecg']
 
-            # Process each ECG lead
-            for lead_idx, lead_name in enumerate(self.config.ecg_leads, 1):
+            # Process each selected ECG lead
+            for lead_idx, lead_name in enumerate(self.config.selected_leads, 1):
                 if lead_name not in ecg_group:
                     logger.warning(f"Lead {lead_name} not found in {event_key}")
                     continue
@@ -647,10 +675,10 @@ class HDF5FileProcessor:
                     # Extract ECG data (12 seconds at 200Hz = 2400 samples)
                     ecg_data = ecg_group[lead_name][:]
 
-                    # Split into chunks for complete ECG coverage (99.8%)
-                    # 2400 samples with 140-sample chunks, step_size=141 for 17 chunks/lead
-                    chunk_size = self.chunk_processor.config.seq_len  # 140
-                    step_size = 141  # Optimized for 99.8% coverage with 17 chunks per lead
+                    # Split into chunks using optimized strategy from chunking_analysis.py
+                    # 2400 samples with 140-sample chunks, step_size=70 for 33 chunks/lead (50% overlap)
+                    chunk_size = self.chunk_processor.config.chunk_size  # 140
+                    step_size = self.chunk_processor.config.step_size   # 70
 
                     chunks_processed = 0
                     for chunk_start in range(0, len(ecg_data) - chunk_size + 1, step_size):
@@ -676,11 +704,12 @@ class HDF5FileProcessor:
 
                         chunks_processed += 1
 
-                        # Limit number of chunks per lead to avoid overwhelming
-                        if chunks_processed >= 10:  # Process first 10 chunks
-                            break
+                    # Log actual vs expected chunk count
+                    expected_chunks = self.chunk_processor.config.max_chunks_per_lead
+                    logger.info(f"Processed {chunks_processed}/{expected_chunks} chunks from {lead_name} in {event_key}")
 
-                    logger.info(f"Processed {chunks_processed} sub-chunks from {lead_name} in {event_key}")
+                    if chunks_processed != expected_chunks:
+                        logger.warning(f"Chunk count mismatch for {lead_name}: got {chunks_processed}, expected {expected_chunks}")
 
                 except Exception as e:
                     logger.error(f"Error processing lead {lead_name} in {event_key}: {e}")
@@ -824,7 +853,19 @@ class RMSAIProcessor:
 
         self.file_monitor = FileMonitor(self.config, self.file_processor)
 
+        # Log performance estimates
+        perf_estimates = self.config.get_performance_estimate()
+        logger.info(f"Performance estimates: {perf_estimates}")
         logger.info("RMSAI Processor initialized successfully")
+
+    def configure_leads(self, leads: List[str]):
+        """Configure which ECG leads to process"""
+        self.config.set_selected_leads(leads)
+        logger.info(f"Updated processor to use leads: {leads}")
+
+        # Log new performance estimates
+        perf_estimates = self.config.get_performance_estimate()
+        logger.info(f"Updated performance estimates: {perf_estimates}")
 
     def start(self):
         """Start the processing pipeline"""
@@ -885,11 +926,20 @@ class RMSAIProcessor:
                 cursor.execute("SELECT AVG(error_score) FROM chunks")
                 avg_error_score = cursor.fetchone()[0] or 0
 
+                # Chunks per lead statistics
+                cursor.execute("""
+                    SELECT lead_name, COUNT(*) as chunk_count
+                    FROM chunks
+                    GROUP BY lead_name
+                """)
+                chunks_per_lead = dict(cursor.fetchall())
+
                 return {
                     "total_chunks": total_chunks,
                     "anomaly_counts": anomaly_counts,
                     "files_processed": files_processed,
-                    "avg_error_score": avg_error_score
+                    "avg_error_score": avg_error_score,
+                    "chunks_per_lead": chunks_per_lead
                 }
 
         except Exception as e:
@@ -902,6 +952,11 @@ def main():
 
     # Initialize processor
     processor = RMSAIProcessor()
+
+    # Example: Configure to process only specific leads for better performance
+    # Uncomment and modify as needed:
+    # processor.configure_leads(['ECG1', 'ECG2', 'ECG3'])  # Process only first 3 leads
+    # processor.configure_leads(['aVR', 'aVL'])  # Process only aVR and aVL leads
 
     try:
         # Start processing

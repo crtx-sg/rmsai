@@ -78,10 +78,35 @@ class RMSAIDashboard:
         self.db_path = "rmsai_metadata.db"
         self.api_base = "http://localhost:8000/api/v1"
 
+        # Load processor configuration to get selected leads
+        self.selected_leads = self._get_selected_leads()
+
         # Cache for expensive operations
         if 'data_cache' not in st.session_state:
             st.session_state.data_cache = {}
             st.session_state.cache_time = {}
+
+    def _get_selected_leads(self) -> List[str]:
+        """Get currently selected leads from processor configuration"""
+        try:
+            # Try to get from API first
+            response = requests.get(f"{self.api_base}/leads", timeout=3)
+            if response.status_code == 200:
+                leads_data = response.json()
+                return [lead['lead_name'] for lead in leads_data['leads']]
+        except:
+            pass
+
+        # Fallback: query database for available leads
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT DISTINCT lead_name FROM chunks ORDER BY lead_name")
+                leads = [row[0] for row in cursor.fetchall()]
+                return leads
+        except:
+            # Default leads if all else fails
+            return ['ECG1', 'ECG2', 'ECG3', 'aVR', 'aVL', 'aVF', 'vVX']
 
     def load_data(self, use_cache: bool = True, cache_duration: int = 30):
         """Load data from SQLite database with caching"""
@@ -485,8 +510,9 @@ class RMSAIDashboard:
             st.plotly_chart(fig, use_container_width=True)
 
         with col2:
-            # Lead processing volume
-            lead_counts = chunks_df['lead_name'].value_counts()
+            # Lead processing volume - filter to selected leads only
+            selected_chunks = chunks_df[chunks_df['lead_name'].isin(self.selected_leads)] if len(chunks_df) > 0 else chunks_df
+            lead_counts = selected_chunks['lead_name'].value_counts()
 
             fig = px.bar(
                 x=lead_counts.index,
@@ -504,8 +530,9 @@ class RMSAIDashboard:
         # Lead anomaly heatmap
         st.subheader("Lead vs Condition Anomaly Heatmap")
 
-        # Create heatmap data
-        heatmap_data = chunks_df.groupby(['lead_name', 'anomaly_type']).apply(
+        # Create heatmap data - filter to selected leads
+        selected_chunks = chunks_df[chunks_df['lead_name'].isin(self.selected_leads)] if len(chunks_df) > 0 else chunks_df
+        heatmap_data = selected_chunks.groupby(['lead_name', 'anomaly_type']).apply(
             lambda x: (x['anomaly_status'] == 'anomaly').mean() * 100
         ).unstack(fill_value=0)
 
@@ -828,6 +855,14 @@ class RMSAIDashboard:
         """Run the dashboard"""
         # Sidebar configuration
         st.sidebar.title("🔧 Dashboard Settings")
+
+        # Lead selection configuration
+        st.sidebar.subheader("Lead Configuration")
+        st.sidebar.info(f"Currently processing {len(self.selected_leads)} leads: {', '.join(self.selected_leads)}")
+
+        if st.sidebar.button("🔄 Refresh Lead Info"):
+            self.selected_leads = self._get_selected_leads()
+            st.rerun()
 
         # Auto-refresh setting
         refresh_setting = self.render_header()

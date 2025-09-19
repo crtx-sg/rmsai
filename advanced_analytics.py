@@ -68,9 +68,10 @@ logger = logging.getLogger(__name__)
 class EmbeddingAnalytics:
     """Advanced analytics on ECG embeddings for pattern discovery"""
 
-    def __init__(self, vector_db_path: str, sqlite_db_path: str):
+    def __init__(self, vector_db_path: str, sqlite_db_path: str, selected_leads: Optional[List[str]] = None):
         self.vector_db_path = vector_db_path
         self.sqlite_db_path = sqlite_db_path
+        self.selected_leads = selected_leads  # Filter analysis to specific leads if provided
         self.embeddings_cache = None
         self.metadata_cache = None
         self.cache_timestamp = None
@@ -79,6 +80,39 @@ class EmbeddingAnalytics:
         # Verify dependencies
         if not CHROMADB_AVAILABLE:
             logger.warning("ChromaDB not available - vector operations will be limited")
+
+        # Get available leads if none specified
+        if self.selected_leads is None:
+            self.selected_leads = self._get_available_leads()
+
+        logger.info(f"Analytics configured for leads: {self.selected_leads}")
+
+    def _get_available_leads(self) -> List[str]:
+        """Get list of available leads from database"""
+        try:
+            with sqlite3.connect(self.sqlite_db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT DISTINCT lead_name FROM chunks ORDER BY lead_name")
+                leads = [row[0] for row in cursor.fetchall()]
+                return leads if leads else ['ECG1', 'ECG2', 'ECG3', 'aVR', 'aVL', 'aVF', 'vVX']
+        except Exception as e:
+            logger.warning(f"Could not get available leads: {e}")
+            return ['ECG1', 'ECG2', 'ECG3', 'aVR', 'aVL', 'aVF', 'vVX']
+
+    def set_selected_leads(self, leads: List[str]):
+        """Update the selected leads for analysis"""
+        available_leads = self._get_available_leads()
+        invalid_leads = [lead for lead in leads if lead not in available_leads]
+        if invalid_leads:
+            logger.warning(f"Invalid leads specified: {invalid_leads}. Available: {available_leads}")
+            leads = [lead for lead in leads if lead in available_leads]
+
+        self.selected_leads = leads
+        # Clear cache to force reload with new lead filter
+        self.embeddings_cache = None
+        self.metadata_cache = None
+        self.cache_timestamp = None
+        logger.info(f"Updated analytics to focus on leads: {self.selected_leads}")
 
     def _is_cache_valid(self) -> bool:
         """Check if cached data is still valid"""
@@ -128,6 +162,15 @@ class EmbeddingAnalytics:
 
             # Merge datasets
             full_metadata = metadata_df.merge(sql_data, on='chunk_id', how='left')
+
+            # Filter to selected leads if specified
+            if self.selected_leads:
+                before_filter = len(full_metadata)
+                lead_mask = full_metadata['lead_name'].isin(self.selected_leads)
+                full_metadata = full_metadata[lead_mask]
+                embeddings = embeddings[lead_mask.values]
+                after_filter = len(full_metadata)
+                logger.info(f"Filtered data: {before_filter} -> {after_filter} chunks (leads: {self.selected_leads})")
 
             # Cache the results
             self.embeddings_cache = embeddings
@@ -855,7 +898,8 @@ class EmbeddingAnalytics:
 
 def run_comprehensive_analysis(vector_db_path: str = "vector_db",
                              sqlite_db_path: str = "rmsai_metadata.db",
-                             output_dir: str = "analytics_output") -> Dict[str, Any]:
+                             output_dir: str = "analytics_output",
+                             selected_leads: Optional[List[str]] = None) -> Dict[str, Any]:
     """Run comprehensive analytics pipeline"""
     import os
 
@@ -863,8 +907,10 @@ def run_comprehensive_analysis(vector_db_path: str = "vector_db",
     os.makedirs(output_dir, exist_ok=True)
 
     logger.info("Starting comprehensive analytics pipeline...")
+    if selected_leads:
+        logger.info(f"Analytics restricted to leads: {selected_leads}")
 
-    analytics = EmbeddingAnalytics(vector_db_path, sqlite_db_path)
+    analytics = EmbeddingAnalytics(vector_db_path, sqlite_db_path, selected_leads)
 
     results = {
         'timestamp': datetime.now().isoformat(),
