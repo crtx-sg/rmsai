@@ -14,6 +14,8 @@ Features:
 - Recent anomalies table with filtering
 - System health monitoring
 - Similarity search interface
+- Patient Events view with AI anomaly verdicts and processing stats
+- Patient-specific analysis with anomaly patterns and event history
 - Auto-refresh functionality
 
 Usage:
@@ -32,6 +34,9 @@ import sqlite3
 import time
 import requests
 import json
+import re
+import h5py
+import os
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
 
@@ -121,7 +126,7 @@ class RMSAIDashboard:
 
         try:
             with sqlite3.connect(self.db_path) as conn:
-                # Main chunks data
+                # Main chunks data - expanded for patient views
                 chunks_df = pd.read_sql_query("""
                     SELECT chunk_id, event_id, source_file, lead_name,
                            anomaly_status, anomaly_type, error_score,
@@ -138,6 +143,36 @@ class RMSAIDashboard:
                     ORDER BY processing_timestamp DESC
                     LIMIT 1000
                 """, conn)
+
+                # Process chunks data for patient views
+                if not chunks_df.empty:
+                    # Add timestamp column
+                    chunks_df['timestamp'] = pd.to_datetime(chunks_df['processing_timestamp'])
+                    # Add processed_time (for now, same as processing_timestamp)
+                    chunks_df['processed_time'] = chunks_df['processing_timestamp']
+
+                    # Extract patient ID from source_file
+                    def extract_patient_id(source_file):
+                        if 'PT' in str(source_file):
+                            # Find PT followed by digits
+                            match = re.search(r'PT\d+', str(source_file))
+                            if match:
+                                return match.group()
+                        return 'Unknown'
+
+                    chunks_df['patient_id'] = chunks_df['source_file'].apply(extract_patient_id)
+
+                    # Add condition column - map from anomaly types or infer from pattern
+                    def infer_condition(row):
+                        if pd.isna(row['anomaly_type']) or row['anomaly_type'] == 'None':
+                            return 'Normal'
+                        elif row['anomaly_status'] == 'normal':
+                            return 'Normal'
+                        else:
+                            # Use the anomaly_type as the condition if available
+                            return row['anomaly_type']
+
+                    chunks_df['condition'] = chunks_df.apply(infer_condition, axis=1)
 
                 # Cache the results
                 data = (chunks_df, files_df)
@@ -178,7 +213,7 @@ class RMSAIDashboard:
 
         with col3:
             # Manual refresh button
-            if st.button("🔄 Refresh Now", use_container_width=True):
+            if st.button("🔄 Refresh Now", width='stretch'):
                 # Clear cache
                 st.session_state.data_cache = {}
                 st.session_state.cache_time = {}
@@ -319,7 +354,7 @@ class RMSAIDashboard:
 
         # Prepare timeline data
         if aggregation == "Hour":
-            filtered_df['time_bucket'] = filtered_df['timestamp'].dt.floor('H')
+            filtered_df['time_bucket'] = filtered_df['timestamp'].dt.floor('h')
         else:
             filtered_df['time_bucket'] = filtered_df['timestamp'].dt.floor('D')
 
@@ -400,7 +435,7 @@ class RMSAIDashboard:
             height=400 if not show_leads else 200 * len(leads)
         )
 
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
     def render_condition_analysis(self, chunks_df: pd.DataFrame):
         """Render condition-based analysis with enhanced visualizations"""
@@ -423,7 +458,7 @@ class RMSAIDashboard:
                 color_discrete_sequence=px.colors.qualitative.Set3
             )
             fig.update_traces(textposition='inside', textinfo='percent+label')
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width='stretch')
 
         with col2:
             # Anomaly rate by condition
@@ -446,7 +481,7 @@ class RMSAIDashboard:
                 hover_data={'Count': condition_stats['Count']}
             )
             fig.update_layout(yaxis_title="Condition")
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width='stretch')
 
         # Detailed condition table
         st.subheader("Condition Statistics")
@@ -507,7 +542,7 @@ class RMSAIDashboard:
                 yaxis_title="Error Score",
                 showlegend=False
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width='stretch')
 
         with col2:
             # Lead processing volume - filter to selected leads only
@@ -525,7 +560,7 @@ class RMSAIDashboard:
                 xaxis_title="ECG Lead",
                 yaxis_title="Number of Chunks"
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width='stretch')
 
         # Lead anomaly heatmap
         st.subheader("Lead vs Condition Anomaly Heatmap")
@@ -533,7 +568,7 @@ class RMSAIDashboard:
         # Create heatmap data - filter to selected leads
         selected_chunks = chunks_df[chunks_df['lead_name'].isin(self.selected_leads)] if len(chunks_df) > 0 else chunks_df
         heatmap_data = selected_chunks.groupby(['lead_name', 'anomaly_type']).apply(
-            lambda x: (x['anomaly_status'] == 'anomaly').mean() * 100
+            lambda x: (x['anomaly_status'] == 'anomaly').mean() * 100, include_groups=False
         ).unstack(fill_value=0)
 
         if not heatmap_data.empty:
@@ -550,7 +585,7 @@ class RMSAIDashboard:
                 xaxis_title="Condition",
                 yaxis_title="ECG Lead"
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width='stretch')
 
     def render_recent_anomalies(self, chunks_df: pd.DataFrame):
         """Render recent anomalies table with advanced filtering"""
@@ -688,7 +723,7 @@ class RMSAIDashboard:
                         'failed': '#dc3545'
                     }
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width='stretch')
 
                 # Show error details if any
                 failed_files = files_df[files_df['status'] == 'failed']
@@ -731,7 +766,7 @@ class RMSAIDashboard:
                     xaxis_title="Date",
                     yaxis_title="Number of Files"
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width='stretch')
 
         # System performance metrics
         st.subheader("Performance Metrics")
@@ -821,7 +856,7 @@ class RMSAIDashboard:
                             hover_data=['Distance', 'Lead', 'Anomaly Status']
                         )
                         fig.update_layout(xaxis_tickangle=-45)
-                        st.plotly_chart(fig, use_container_width=True)
+                        st.plotly_chart(fig, width='stretch')
 
                     else:
                         st.info("No similar patterns found above the similarity threshold")
@@ -839,6 +874,621 @@ class RMSAIDashboard:
                 st.error("Cannot connect to API server. Make sure it's running on port 8000.")
             except Exception as e:
                 st.error(f"Error performing similarity search: {e}")
+
+    def _aggregate_patient_events(self, chunks_df: pd.DataFrame) -> pd.DataFrame:
+        """Aggregate chunks by Patient ID, Event ID, and Lead for Patient Events view"""
+        if len(chunks_df) == 0:
+            return pd.DataFrame()
+
+        # Group by Patient ID, Event ID, and Lead
+        grouped = chunks_df.groupby(['patient_id', 'event_id', 'lead_name'], as_index=False).agg({
+            'condition': 'first',  # Original condition from data
+            'anomaly_status': lambda x: (x == 'anomaly').sum(),  # Count of anomalous chunks
+            'anomaly_type': lambda x: [t for t in x if t and t != 'None' and pd.notna(t)],  # Collect anomaly types
+            'error_score': 'mean',  # Average error score
+            'timestamp': 'first',  # Event timestamp
+            'processed_time': 'max',  # Last chunk processing time (approximation)
+            'chunk_id': 'count'  # Total chunks for this lead
+        }).rename(columns={'chunk_id': 'total_chunks'})
+
+        # Process AI Anomaly Verdict - unique anomalies with most severe first
+        severity_order = {
+            'Ventricular Tachycardia (MIT-BIH)': 5,
+            'Atrial Fibrillation (PTB-XL)': 4,
+            'Unknown Arrhythmia': 3,
+            'Tachycardia': 2,
+            'Bradycardia': 1
+        }
+
+        def process_ai_verdict(anomaly_types_list, total_chunks, anomaly_count):
+            if not anomaly_types_list or anomaly_count == 0:
+                return "Normal"
+
+            # Get unique anomaly types and sort by severity
+            unique_anomalies = list(set(anomaly_types_list))
+            unique_anomalies.sort(key=lambda x: severity_order.get(x, 0), reverse=True)
+
+            if len(unique_anomalies) == 1:
+                # Single anomaly type
+                anomaly = unique_anomalies[0]
+                percentage = (anomaly_count / total_chunks) * 100
+                if percentage < 30:
+                    return f"{anomaly} ({percentage:.0f}%)"
+                else:
+                    return anomaly
+            else:
+                # Multiple anomaly types
+                return ", ".join(unique_anomalies)
+
+        grouped['ai_anomaly_verdict'] = grouped.apply(
+            lambda row: process_ai_verdict(
+                row['anomaly_type'],
+                row['total_chunks'],
+                row['anomaly_status']
+            ),
+            axis=1
+        )
+
+        # Calculate processing duration (mock - would need actual timestamps)
+        grouped['processing_duration_ms'] = grouped['total_chunks'] * 10  # Estimate: 10ms per chunk
+
+        # Format final columns
+        result_df = grouped[[
+            'patient_id', 'event_id', 'lead_name', 'condition',
+            'ai_anomaly_verdict', 'error_score', 'timestamp',
+            'processing_duration_ms'
+        ]].copy()
+
+        result_df.columns = [
+            'Patient ID', 'Event ID', 'Lead', 'Condition',
+            'AI Anomaly Verdict', 'Avg Error Score', 'Event Timestamp',
+            'Processing Duration (ms)'
+        ]
+
+        return result_df
+
+    def render_patient_events(self, chunks_df: pd.DataFrame):
+        """Render Patient Events view"""
+        st.header("🏥 Patient Events")
+        st.markdown("*Event-level view showing AI anomaly detection results per lead*")
+
+        if len(chunks_df) == 0:
+            st.warning("No patient event data available")
+            return
+
+        # Aggregate data
+        events_df = self._aggregate_patient_events(chunks_df)
+
+        if len(events_df) == 0:
+            st.warning("No aggregated patient events found")
+            return
+
+        # Stats for this view
+        col1, col2, col3, col4 = st.columns(4)
+
+        with col1:
+            total_events = len(events_df['Event ID'].unique())
+            st.metric("Total Events", f"{total_events:,}")
+
+        with col2:
+            # Time to process single event (all configured leads)
+            avg_processing_time = events_df.groupby('Event ID')['Processing Duration (ms)'].sum().mean()
+            st.metric("Avg Event Processing Time", f"{avg_processing_time:.0f}ms")
+
+        with col3:
+            # Throughput calculation
+            if len(events_df) > 1:
+                time_span = (pd.to_datetime(events_df['Event Timestamp']).max() -
+                           pd.to_datetime(events_df['Event Timestamp']).min()).total_seconds()
+                if time_span > 0:
+                    throughput = (total_events * 60) / time_span  # events/min
+                    st.metric("Throughput", f"{throughput:.1f} events/min")
+                else:
+                    st.metric("Throughput", "N/A")
+            else:
+                st.metric("Throughput", "N/A")
+
+        with col4:
+            # Anomaly detection rate
+            anomaly_rate = (events_df['AI Anomaly Verdict'] != 'Normal').mean() * 100
+            st.metric("Anomaly Detection Rate", f"{anomaly_rate:.1f}%")
+
+        # Filters
+        st.subheader("Filters")
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            patients = ['All'] + list(events_df['Patient ID'].unique())
+            selected_patient = st.selectbox("Patient ID", patients)
+
+        with col2:
+            conditions = ['All'] + list(events_df['Condition'].unique())
+            selected_condition = st.selectbox("Condition", conditions)
+
+        with col3:
+            verdicts = ['All'] + list(events_df['AI Anomaly Verdict'].unique())
+            selected_verdict = st.selectbox("AI Verdict", verdicts)
+
+        # Apply filters
+        filtered_df = events_df.copy()
+        if selected_patient != 'All':
+            filtered_df = filtered_df[filtered_df['Patient ID'] == selected_patient]
+        if selected_condition != 'All':
+            filtered_df = filtered_df[filtered_df['Condition'] == selected_condition]
+        if selected_verdict != 'All':
+            filtered_df = filtered_df[filtered_df['AI Anomaly Verdict'] == selected_verdict]
+
+        # Pagination
+        st.subheader("Patient Events")
+        rows_per_page = st.selectbox("Rows per page", [10, 25, 50, 100], index=1)
+
+        if len(filtered_df) > 0:
+            total_pages = (len(filtered_df) - 1) // rows_per_page + 1
+            page = st.selectbox("Page", range(1, total_pages + 1))
+
+            start_idx = (page - 1) * rows_per_page
+            end_idx = start_idx + rows_per_page
+
+            # Display table
+            display_df = filtered_df.iloc[start_idx:end_idx].copy()
+
+            # Format columns for display
+            display_df['Avg Error Score'] = display_df['Avg Error Score'].round(4)
+            display_df['Event Timestamp'] = pd.to_datetime(display_df['Event Timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
+
+            st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+            st.info(f"Showing {len(display_df)} of {len(filtered_df)} events (Page {page} of {total_pages})")
+        else:
+            st.warning("No events match the selected filters")
+
+    def render_patient_specific(self, chunks_df: pd.DataFrame):
+        """Render Patient Specific view"""
+        st.header("👤 Patient Specific Analysis")
+        st.markdown("*Patient-focused view with event summaries and anomaly patterns*")
+
+        if len(chunks_df) == 0:
+            st.warning("No patient data available")
+            return
+
+        # Patient selection
+        patients = sorted(chunks_df['patient_id'].unique()) if 'patient_id' in chunks_df.columns else []
+
+        if not patients:
+            st.warning("No patient IDs found in the data")
+            return
+
+        selected_patient = st.selectbox("Select Patient", patients)
+
+        if not selected_patient:
+            return
+
+        # Filter data for selected patient
+        patient_data = chunks_df[chunks_df['patient_id'] == selected_patient]
+
+        # Aggregate by event for this patient
+        patient_events = patient_data.groupby('event_id', as_index=False).agg({
+            'condition': 'first',
+            'anomaly_type': lambda x: [t for t in x if t and t != 'None' and pd.notna(t)],
+            'anomaly_status': lambda x: (x == 'anomaly').sum(),
+            'error_score': 'mean',
+            'timestamp': 'first',
+            'chunk_id': 'count'
+        }).rename(columns={'chunk_id': 'total_chunks'})
+
+        # Process AI Verdict for each event
+        severity_order = {
+            'Ventricular Tachycardia (MIT-BIH)': 5,
+            'Atrial Fibrillation (PTB-XL)': 4,
+            'Unknown Arrhythmia': 3,
+            'Tachycardia': 2,
+            'Bradycardia': 1
+        }
+
+        def get_event_ai_verdict(anomaly_types_list):
+            if not anomaly_types_list:
+                return "Normal"
+
+            unique_anomalies = list(set(anomaly_types_list))
+            unique_anomalies.sort(key=lambda x: severity_order.get(x, 0), reverse=True)
+
+            return ", ".join(unique_anomalies)
+
+        patient_events['ai_verdict'] = patient_events['anomaly_type'].apply(get_event_ai_verdict)
+
+        # Patient summary stats
+        st.subheader(f"Patient {selected_patient} - Summary")
+
+        col1, col2, col3, col4 = st.columns(4)
+
+        with col1:
+            total_events = len(patient_events)
+            st.metric("Total Events", f"{total_events:,}")
+
+        with col2:
+            anomaly_events = (patient_events['ai_verdict'] != 'Normal').sum()
+            st.metric("Anomaly Events", f"{anomaly_events:,}")
+
+        with col3:
+            if total_events > 0:
+                anomaly_rate = (anomaly_events / total_events) * 100
+                st.metric("Anomaly Rate", f"{anomaly_rate:.1f}%")
+            else:
+                st.metric("Anomaly Rate", "0%")
+
+        with col4:
+            avg_error = patient_events['error_score'].mean()
+            st.metric("Avg Error Score", f"{avg_error:.4f}")
+
+        # Most common anomalies
+        all_anomalies = []
+        for anomaly_list in patient_events['anomaly_type']:
+            all_anomalies.extend(anomaly_list)
+
+        if all_anomalies:
+            anomaly_counts = pd.Series(all_anomalies).value_counts()
+            st.subheader("Most Common Anomalies")
+
+            fig = px.bar(
+                x=anomaly_counts.index,
+                y=anomaly_counts.values,
+                title=f"Anomaly Distribution for Patient {selected_patient}",
+                labels={'x': 'Anomaly Type', 'y': 'Count'}
+            )
+            fig.update_layout(xaxis_tickangle=-45)
+            st.plotly_chart(fig, width='stretch')
+
+        # Events table
+        st.subheader("Patient Events")
+
+        # Format for display
+        display_events = patient_events[['event_id', 'condition', 'ai_verdict', 'error_score', 'timestamp']].copy()
+        display_events.columns = ['Event ID', 'Reported Condition', 'AI Verdict', 'Avg Error Score', 'Timestamp']
+        display_events['Avg Error Score'] = display_events['Avg Error Score'].round(4)
+        display_events['Timestamp'] = pd.to_datetime(display_events['Timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
+
+        # Sort by timestamp descending
+        display_events = display_events.sort_values('Timestamp', ascending=False)
+
+        # Pagination for patient events
+        rows_per_page = st.selectbox("Events per page", [5, 10, 20, 50], index=1, key="patient_pagination")
+
+        if len(display_events) > 0:
+            total_pages = (len(display_events) - 1) // rows_per_page + 1
+            page = st.selectbox("Page", range(1, total_pages + 1), key="patient_page")
+
+            start_idx = (page - 1) * rows_per_page
+            end_idx = start_idx + rows_per_page
+
+            st.dataframe(display_events.iloc[start_idx:end_idx], use_container_width=True, hide_index=True)
+
+            st.info(f"Showing {min(rows_per_page, len(display_events) - start_idx)} of {len(display_events)} events (Page {page} of {total_pages})")
+        else:
+            st.warning("No events found for this patient")
+
+    def _get_ground_truth_conditions(self, chunks_df: pd.DataFrame) -> Dict[str, str]:
+        """Extract ground truth conditions from HDF5 files"""
+        ground_truth = {}
+
+        try:
+            # Get unique source files
+            unique_files = chunks_df['source_file'].unique()
+
+            for source_file in unique_files:
+                file_path = source_file  # source_file already includes the data/ prefix
+
+                if os.path.exists(file_path):
+                    try:
+                        with h5py.File(file_path, 'r') as f:
+                            # Get all events in this file
+                            events = [k for k in f.keys() if k.startswith('event_')]
+
+                            for event_key in events:
+                                event_group = f[event_key]
+
+                                # Extract ground truth condition from event attributes
+                                if hasattr(event_group, 'attrs'):
+                                    condition = None
+
+                                    # Try different possible attribute names
+                                    for attr_name in ['condition', 'Condition', 'reported_condition']:
+                                        if attr_name in event_group.attrs:
+                                            condition = event_group.attrs[attr_name]
+                                            if isinstance(condition, bytes):
+                                                condition = condition.decode('utf-8')
+                                            break
+
+                                    if condition:
+                                        ground_truth[event_key] = condition
+                                    else:
+                                        # Fallback: look in metadata if available
+                                        if 'metadata' in f and hasattr(f['metadata'], 'attrs'):
+                                            for attr_name in ['condition', 'default_condition']:
+                                                if attr_name in f['metadata'].attrs:
+                                                    condition = f['metadata'].attrs[attr_name]
+                                                    if isinstance(condition, bytes):
+                                                        condition = condition.decode('utf-8')
+                                                    ground_truth[event_key] = condition
+                                                    break
+
+                                # If still no condition found, mark as unknown
+                                if event_key not in ground_truth:
+                                    ground_truth[event_key] = 'Unknown'
+
+                    except Exception as e:
+                        st.warning(f"Could not read HDF5 file {file_path}: {e}")
+
+        except Exception as e:
+            st.warning(f"Error extracting ground truth conditions: {e}")
+
+        return ground_truth
+
+    def render_patient_analysis(self, chunks_df: pd.DataFrame):
+        """Render combined Patient Analysis view with both events and patient-specific data"""
+        st.header("👥 Patient Analysis")
+        st.markdown("*Comprehensive patient view with event-level analysis and AI vs ground truth comparison*")
+
+        if len(chunks_df) == 0:
+            st.warning("No patient data available")
+            return
+
+        # Patient selection
+        patients = sorted(chunks_df['patient_id'].unique()) if 'patient_id' in chunks_df.columns else []
+
+        if not patients:
+            st.warning("No patient IDs found in the data")
+            return
+
+        selected_patient = st.selectbox("Select Patient", patients, key="patient_analysis_select")
+
+        if not selected_patient:
+            return
+
+        # Filter data for selected patient
+        patient_data = chunks_df[chunks_df['patient_id'] == selected_patient]
+
+        # Get ground truth conditions
+        ground_truth_conditions = self._get_ground_truth_conditions(patient_data)
+
+        # Patient summary stats
+        st.subheader(f"Patient {selected_patient} - Summary")
+
+        col1, col2, col3, col4 = st.columns(4)
+
+        # Calculate patient-level stats
+        patient_events = patient_data.groupby('event_id', as_index=False).agg({
+            'anomaly_type': lambda x: [t for t in x if t and t != 'None' and pd.notna(t)],
+            'anomaly_status': lambda x: (x == 'anomaly').sum(),
+            'error_score': 'mean',
+            'timestamp': 'first',
+            'chunk_id': 'count'
+        }).rename(columns={'chunk_id': 'total_chunks'})
+
+        # Add ground truth and AI verdict
+        def get_ai_verdict(anomaly_types_list):
+            if not anomaly_types_list:
+                return "Normal"
+
+            severity_order = {
+                'Ventricular Tachycardia (MIT-BIH)': 5,
+                'Atrial Fibrillation (PTB-XL)': 4,
+                'Unknown Arrhythmia': 3,
+                'Tachycardia': 2,
+                'Bradycardia': 1
+            }
+
+            unique_anomalies = list(set(anomaly_types_list))
+            unique_anomalies.sort(key=lambda x: severity_order.get(x, 0), reverse=True)
+            return ", ".join(unique_anomalies)
+
+        patient_events['ai_verdict'] = patient_events['anomaly_type'].apply(get_ai_verdict)
+        patient_events['event_condition'] = patient_events['event_id'].map(ground_truth_conditions).fillna('Unknown')
+
+        with col1:
+            total_events = len(patient_events)
+            st.metric("Total Events", f"{total_events:,}")
+
+        with col2:
+            anomaly_events = (patient_events['ai_verdict'] != 'Normal').sum()
+            st.metric("AI Detected Anomalies", f"{anomaly_events:,}")
+
+        with col3:
+            # Accuracy calculation (AI vs Ground Truth)
+            if total_events > 0:
+                # Simple accuracy: count when AI verdict matches event condition
+                matches = 0
+                for _, row in patient_events.iterrows():
+                    ai_verdict = row['ai_verdict']
+                    event_condition = row['event_condition']
+
+                    # Normalize for comparison
+                    if ai_verdict == 'Normal' and event_condition in ['Normal', 'Unknown']:
+                        matches += 1
+                    elif ai_verdict != 'Normal' and event_condition != 'Normal' and event_condition != 'Unknown':
+                        matches += 1
+
+                accuracy = (matches / total_events) * 100
+                st.metric("AI Accuracy", f"{accuracy:.1f}%")
+            else:
+                st.metric("AI Accuracy", "N/A")
+
+        with col4:
+            avg_error = patient_events['error_score'].mean()
+            st.metric("Avg Error Score", f"{avg_error:.4f}")
+
+        # Event-level analysis table
+        st.subheader("Event Analysis - AI vs Ground Truth")
+
+        # Aggregate data by event and lead for detailed view
+        events_by_lead = patient_data.groupby(['event_id', 'lead_name'], as_index=False).agg({
+            'anomaly_status': lambda x: (x == 'anomaly').sum(),
+            'anomaly_type': lambda x: [t for t in x if t and t != 'None' and pd.notna(t)],
+            'error_score': 'mean',
+            'timestamp': 'first',
+            'chunk_id': 'count'
+        }).rename(columns={'chunk_id': 'total_chunks'})
+
+        # Process AI verdicts for each lead
+        def process_lead_ai_verdict(anomaly_types_list, total_chunks, anomaly_count):
+            if not anomaly_types_list or anomaly_count == 0:
+                return "Normal"
+
+            severity_order = {
+                'Ventricular Tachycardia (MIT-BIH)': 5,
+                'Atrial Fibrillation (PTB-XL)': 4,
+                'Unknown Arrhythmia': 3,
+                'Tachycardia': 2,
+                'Bradycardia': 1
+            }
+
+            unique_anomalies = list(set(anomaly_types_list))
+            unique_anomalies.sort(key=lambda x: severity_order.get(x, 0), reverse=True)
+
+            if len(unique_anomalies) == 1:
+                anomaly = unique_anomalies[0]
+                percentage = (anomaly_count / total_chunks) * 100
+                if percentage < 30:
+                    return f"{anomaly} ({percentage:.0f}%)"
+                else:
+                    return anomaly
+            else:
+                return ", ".join(unique_anomalies)
+
+        events_by_lead['ai_verdict'] = events_by_lead.apply(
+            lambda row: process_lead_ai_verdict(
+                row['anomaly_type'],
+                row['total_chunks'],
+                row['anomaly_status']
+            ),
+            axis=1
+        )
+
+        # Add ground truth
+        events_by_lead['event_condition'] = events_by_lead['event_id'].map(ground_truth_conditions).fillna('Unknown')
+
+        # Format for display
+        display_events = events_by_lead[['event_id', 'lead_name', 'event_condition', 'ai_verdict', 'error_score', 'timestamp']].copy()
+        display_events.columns = ['Event ID', 'Lead', 'Event Condition (Ground Truth)', 'AI Verdict', 'Avg Error Score', 'Timestamp']
+        display_events['Avg Error Score'] = display_events['Avg Error Score'].round(4)
+        display_events['Timestamp'] = pd.to_datetime(display_events['Timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
+
+        # Sort by timestamp descending
+        display_events = display_events.sort_values('Timestamp', ascending=False)
+
+        # Add comparison column
+        def compare_verdict(row):
+            event_condition = row['Event Condition (Ground Truth)']
+            ai_verdict = row['AI Verdict']
+
+            if event_condition == 'Unknown':
+                return "🔍 Unknown GT"
+            elif ai_verdict == 'Normal' and event_condition == 'Normal':
+                return "✅ Match"
+            elif ai_verdict != 'Normal' and event_condition != 'Normal' and event_condition != 'Unknown':
+                return "✅ Match"
+            elif ai_verdict == 'Normal' and event_condition != 'Normal':
+                return "❌ Missed"
+            elif ai_verdict != 'Normal' and event_condition == 'Normal':
+                return "❌ False Positive"
+            else:
+                return "❓ Unclear"
+
+        display_events['Comparison'] = display_events.apply(compare_verdict, axis=1)
+
+        # Filters for event table
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            event_ids = ['All'] + list(display_events['Event ID'].unique())
+            selected_event = st.selectbox("Filter by Event", event_ids, key="event_filter")
+
+        with col2:
+            conditions = ['All'] + list(display_events['Event Condition (Ground Truth)'].unique())
+            selected_condition = st.selectbox("Filter by Condition", conditions, key="condition_filter")
+
+        with col3:
+            comparisons = ['All'] + list(display_events['Comparison'].unique())
+            selected_comparison = st.selectbox("Filter by Comparison", comparisons, key="comparison_filter")
+
+        # Apply filters
+        filtered_events = display_events.copy()
+        if selected_event != 'All':
+            filtered_events = filtered_events[filtered_events['Event ID'] == selected_event]
+        if selected_condition != 'All':
+            filtered_events = filtered_events[filtered_events['Event Condition (Ground Truth)'] == selected_condition]
+        if selected_comparison != 'All':
+            filtered_events = filtered_events[filtered_events['Comparison'] == selected_comparison]
+
+        # Pagination
+        rows_per_page = st.selectbox("Rows per page", [10, 25, 50, 100], index=1, key="events_pagination")
+
+        if len(filtered_events) > 0:
+            total_pages = (len(filtered_events) - 1) // rows_per_page + 1
+            page = st.selectbox("Page", range(1, total_pages + 1), key="events_page")
+
+            start_idx = (page - 1) * rows_per_page
+            end_idx = start_idx + rows_per_page
+
+            st.dataframe(filtered_events.iloc[start_idx:end_idx], use_container_width=True, hide_index=True)
+
+            st.info(f"Showing {min(rows_per_page, len(filtered_events) - start_idx)} of {len(filtered_events)} events (Page {page} of {total_pages})")
+        else:
+            st.warning("No events match the selected filters")
+
+        # Performance Stats Section
+        st.subheader("Processing Performance")
+
+        perf_col1, perf_col2, perf_col3, perf_col4 = st.columns(4)
+
+        with perf_col1:
+            # Time to process single event (all configured leads)
+            avg_processing_time = events_by_lead.groupby('event_id')['total_chunks'].sum().mean() * 10  # 10ms per chunk estimate
+            st.metric("Avg Event Processing Time", f"{avg_processing_time:.0f}ms")
+
+        with perf_col2:
+            # Throughput calculation
+            if len(events_by_lead) > 1:
+                time_span = (pd.to_datetime(events_by_lead['timestamp']).max() -
+                           pd.to_datetime(events_by_lead['timestamp']).min()).total_seconds()
+                if time_span > 0:
+                    unique_events = events_by_lead['event_id'].nunique()
+                    throughput = (unique_events * 60) / time_span  # events/min
+                    st.metric("Throughput", f"{throughput:.1f} events/min")
+                else:
+                    st.metric("Throughput", "N/A")
+            else:
+                st.metric("Throughput", "N/A")
+
+        with perf_col3:
+            # Total chunks processed for this patient
+            total_chunks = len(patient_data)
+            st.metric("Total Chunks Processed", f"{total_chunks:,}")
+
+        with perf_col4:
+            # Average chunks per event
+            avg_chunks_per_event = total_chunks / total_events if total_events > 0 else 0
+            st.metric("Avg Chunks/Event", f"{avg_chunks_per_event:.0f}")
+
+        # Comparison Summary Chart
+        if len(patient_events) > 0:
+            st.subheader("AI Performance Summary")
+
+            comparison_counts = display_events['Comparison'].value_counts()
+
+            if len(comparison_counts) > 0:
+                fig = px.pie(
+                    values=comparison_counts.values,
+                    names=comparison_counts.index,
+                    title=f"AI vs Ground Truth Comparison for Patient {selected_patient}",
+                    color_discrete_map={
+                        '✅ Match': 'green',
+                        '❌ Missed': 'red',
+                        '❌ False Positive': 'orange',
+                        '🔍 Unknown GT': 'gray',
+                        '❓ Unclear': 'yellow'
+                    }
+                )
+                st.plotly_chart(fig, width='stretch')
 
     def render_api_status(self):
         """Render API connection status"""
@@ -887,9 +1537,10 @@ class RMSAIDashboard:
         self.render_overview_metrics(chunks_df, files_df)
 
         # Create tabs for different views
-        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+        tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
             "📈 Timeline", "🔍 Conditions", "🔬 ECG Leads",
-            "⚠️ Anomalies", "💊 System Health", "🔎 Similarity"
+            "⚠️ Anomalies", "💊 System Health", "🔎 Similarity",
+            "👥 Patient Analysis"
         ])
 
         with tab1:
@@ -909,6 +1560,9 @@ class RMSAIDashboard:
 
         with tab6:
             self.render_similarity_search(chunks_df)
+
+        with tab7:
+            self.render_patient_analysis(chunks_df)
 
         # Footer
         st.sidebar.markdown("---")

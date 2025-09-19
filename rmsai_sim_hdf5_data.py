@@ -1,3 +1,28 @@
+#!/usr/bin/env python3
+"""
+RMSAI HDF5 Data Generator with Configurable Anomaly Proportions
+===============================================================
+
+Generates synthetic ECG datasets in HDF5 format with configurable proportions of different
+cardiac conditions for training and testing anomaly detection systems.
+
+Features:
+- Configurable anomaly/normal event proportions
+- 5 cardiac conditions: Normal, Tachycardia, Bradycardia, Atrial Fibrillation, Ventricular Tachycardia
+- Multi-modal signals: ECG (7 leads), PPG, respiratory, vital signs
+- Realistic cardiac morphology for each condition
+- Flexible command-line interface with preset configurations
+
+Usage Examples:
+  python rmsai_sim_hdf5_data.py 20 --normal 50              # 50% normal, 50% abnormal events
+  python rmsai_sim_hdf5_data.py 15 --all-abnormal           # Only abnormal events
+  python rmsai_sim_hdf5_data.py 30 --balanced               # Equal distribution across all conditions
+  python rmsai_sim_hdf5_data.py 25 --high-anomaly           # 5% normal, 95% abnormal
+  python rmsai_sim_hdf5_data.py 10 --proportions 0.1 0.2 0.2 0.25 0.25  # Custom exact proportions
+
+Author: RMSAI Team
+"""
+
 import h5py
 import numpy as np
 import random
@@ -420,8 +445,27 @@ def generate_event_timestamps(num_events, start_time=None):
 
     return timestamps
 
-def generate_condition_and_hr():
-    """Generate a condition and corresponding heart rate."""
+def validate_and_normalize_proportions(proportions):
+    """Validate and normalize condition proportions."""
+    if proportions is None:
+        # Default proportions: 10% normal, 90% abnormal (distributed among 4 abnormal conditions)
+        return [0.1, 0.225, 0.225, 0.225, 0.225]
+
+    if len(proportions) != 5:
+        raise ValueError(f"Expected 5 proportions for conditions, got {len(proportions)}")
+
+    if any(p < 0 for p in proportions):
+        raise ValueError("All proportions must be non-negative")
+
+    total = sum(proportions)
+    if total == 0:
+        raise ValueError("At least one proportion must be greater than 0")
+
+    # Normalize to sum to 1.0
+    return [p / total for p in proportions]
+
+def generate_condition_and_hr(condition_proportions=None):
+    """Generate a condition and corresponding heart rate with configurable proportions."""
     conditions = [
         'Normal',
         'Tachycardia',
@@ -429,8 +473,9 @@ def generate_condition_and_hr():
         'Atrial Fibrillation (PTB-XL)',
         'Ventricular Tachycardia (MIT-BIH)'
     ]
-    # 10% normal, 90% abnormal (distributed among 4 abnormal conditions)
-    condition_weights = [0.1, 0.225, 0.225, 0.225, 0.225]
+
+    # Use provided proportions or default
+    condition_weights = validate_and_normalize_proportions(condition_proportions)
 
     condition = random.choices(conditions, condition_weights)[0]
 
@@ -555,9 +600,14 @@ def create_event_group(hf, event_id, condition, hr, event_timestamp):
 
     return event_group
 
-def main(num_events, patient_id=None):
+def main(num_events, patient_id=None, condition_proportions=None):
     """
     Main function to generate the event-based dataset.
+
+    Args:
+        num_events (int): Number of events to generate
+        patient_id (str): Patient ID, generated if None
+        condition_proportions (list): List of 5 proportions for [Normal, Tachycardia, Bradycardia, AFib, VTach]
     """
     if patient_id is None:
         patient_id = generate_patient_id()
@@ -586,7 +636,7 @@ def main(num_events, patient_id=None):
 
         # Create event groups
         for i in range(num_events):
-            condition, hr = generate_condition_and_hr()
+            condition, hr = generate_condition_and_hr(condition_proportions)
             event_timestamp = event_timestamps[i]
 
             print(f"  - Creating event_{1001+i}: {condition} (HR: {hr} bpm) at {event_timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
@@ -604,7 +654,17 @@ def main(num_events, patient_id=None):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
-        description="Generate a simulated patient dataset with alarm events in HDF5 format."
+        description="Generate a simulated patient dataset with alarm events in HDF5 format.",
+        epilog="""
+Examples:
+  python rmsai_sim_hdf5_data.py 10                                    # Generate 10 events with default proportions (10%% normal, 90%% abnormal)
+  python rmsai_sim_hdf5_data.py 20 --normal 50                        # Generate 20 events with 50%% normal events
+  python rmsai_sim_hdf5_data.py 15 --normal 30 --tachy 20 --brady 20 --afib 20 --vtach 10  # Custom proportions
+  python rmsai_sim_hdf5_data.py 25 --proportions 0.2 0.2 0.2 0.2 0.2 # Equal distribution across all conditions
+  python rmsai_sim_hdf5_data.py 30 --all-normal                       # Generate only normal events
+  python rmsai_sim_hdf5_data.py 40 --all-abnormal                     # Generate only abnormal events (equal mix)
+        """,
+        formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument(
         'num_events',
@@ -618,6 +678,125 @@ if __name__ == '__main__':
         type=str,
         help="Patient ID (e.g., PT1234). If not provided, will be randomly generated."
     )
+
+    # Proportion configuration options
+    proportion_group = parser.add_argument_group('condition proportions',
+                                                'Configure the proportion of different cardiac conditions')
+
+    proportion_group.add_argument(
+        '--proportions',
+        type=float,
+        nargs=5,
+        metavar=('NORMAL', 'TACHY', 'BRADY', 'AFIB', 'VTACH'),
+        help="Specify exact proportions for all 5 conditions: Normal, Tachycardia, Bradycardia, AFib, VTach"
+    )
+
+    proportion_group.add_argument(
+        '--normal',
+        type=float,
+        metavar='PCT',
+        help="Percentage of normal events (0-100). Other conditions split equally."
+    )
+
+    proportion_group.add_argument(
+        '--tachy',
+        type=float,
+        metavar='PCT',
+        help="Percentage of tachycardia events (0-100)"
+    )
+
+    proportion_group.add_argument(
+        '--brady',
+        type=float,
+        metavar='PCT',
+        help="Percentage of bradycardia events (0-100)"
+    )
+
+    proportion_group.add_argument(
+        '--afib',
+        type=float,
+        metavar='PCT',
+        help="Percentage of atrial fibrillation events (0-100)"
+    )
+
+    proportion_group.add_argument(
+        '--vtach',
+        type=float,
+        metavar='PCT',
+        help="Percentage of ventricular tachycardia events (0-100)"
+    )
+
+    # Convenience options
+    convenience_group = parser.add_argument_group('convenience options',
+                                                 'Quick preset configurations')
+
+    convenience_group.add_argument(
+        '--all-normal',
+        action='store_true',
+        help="Generate only normal cardiac events"
+    )
+
+    convenience_group.add_argument(
+        '--all-abnormal',
+        action='store_true',
+        help="Generate only abnormal events (equal mix of 4 abnormal conditions)"
+    )
+
+    convenience_group.add_argument(
+        '--high-anomaly',
+        action='store_true',
+        help="Generate high anomaly dataset (5%% normal, 95%% abnormal)"
+    )
+
+    convenience_group.add_argument(
+        '--balanced',
+        action='store_true',
+        help="Generate balanced dataset (equal 20%% for each condition)"
+    )
+
     args = parser.parse_args()
 
-    main(args.num_events, args.patient_id)
+    # Process proportion arguments
+    condition_proportions = None
+
+    if args.proportions:
+        condition_proportions = args.proportions
+    elif any([args.normal, args.tachy, args.brady, args.afib, args.vtach]):
+        # Individual percentages specified
+        proportions = [
+            args.normal or 0,
+            args.tachy or 0,
+            args.brady or 0,
+            args.afib or 0,
+            args.vtach or 0
+        ]
+
+        # If only some conditions specified, distribute remainder equally
+        specified_total = sum(p for p in proportions if p > 0)
+        if specified_total > 100:
+            parser.error("Total percentages cannot exceed 100%%")
+        elif specified_total < 100:
+            unspecified_count = sum(1 for p in proportions if p == 0)
+            if unspecified_count > 0:
+                remainder = (100 - specified_total) / unspecified_count
+                proportions = [p if p > 0 else remainder for p in proportions]
+
+        condition_proportions = [p / 100.0 for p in proportions]
+    elif args.all_normal:
+        condition_proportions = [1.0, 0.0, 0.0, 0.0, 0.0]
+    elif args.all_abnormal:
+        condition_proportions = [0.0, 0.25, 0.25, 0.25, 0.25]
+    elif args.high_anomaly:
+        condition_proportions = [0.05, 0.2375, 0.2375, 0.2375, 0.2375]
+    elif args.balanced:
+        condition_proportions = [0.2, 0.2, 0.2, 0.2, 0.2]
+
+    # Display configuration
+    if condition_proportions:
+        condition_names = ['Normal', 'Tachycardia', 'Bradycardia', 'Atrial Fibrillation', 'Ventricular Tachycardia']
+        print("Condition proportions:")
+        for name, prop in zip(condition_names, condition_proportions):
+            print(f"  {name}: {prop*100:.1f}%")
+        print()
+
+    main(args.num_events, args.patient_id, condition_proportions)

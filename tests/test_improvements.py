@@ -19,6 +19,7 @@ Usage:
     python test_improvements.py api
     python test_improvements.py analytics
     python test_improvements.py thresholds
+    python test_improvements.py classification
     python test_improvements.py dashboard
     python test_improvements.py pacer
     python test_improvements.py processor
@@ -848,6 +849,35 @@ class ImprovementTester:
             logger.error(f"❌ Analysis tools test failed: {e}")
             return False
 
+    def test_threshold_classification(self) -> bool:
+        """Test threshold values and heart rate-based classification"""
+        logger.info("Testing Threshold Classification System...")
+
+        try:
+            # Import and run the comprehensive threshold tests
+            from test_threshold_classification import ThresholdClassificationTester
+
+            tester = ThresholdClassificationTester()
+            results = tester.run_all_tests()
+
+            # Check if all tests passed
+            all_passed = all(results.values())
+
+            if all_passed:
+                logger.info("✅ All threshold classification tests passed")
+            else:
+                failed_tests = [name for name, passed in results.items() if not passed]
+                logger.error(f"❌ Some threshold tests failed: {failed_tests}")
+
+            return all_passed
+
+        except ImportError as e:
+            logger.error(f"❌ Could not import threshold classification tests: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"❌ Threshold classification test failed: {e}")
+            return False
+
     def run_tests(self, module: str = None) -> Dict[str, bool]:
         """Run all tests or specific module tests"""
         logger.info("Starting RMSAI Improvements Test Suite")
@@ -857,6 +887,7 @@ class ImprovementTester:
             'api': self.test_api_server,
             'analytics': self.test_advanced_analytics,
             'thresholds': self.test_adaptive_thresholds,
+            'classification': self.test_threshold_classification,
             'dashboard': self.test_dashboard,
             'pacer': self.test_pacer_functionality,
             'processor': self.test_lstm_processor,
@@ -916,7 +947,7 @@ def main():
     parser.add_argument(
         'module',
         nargs='?',
-        choices=['api', 'analytics', 'thresholds', 'dashboard', 'pacer', 'processor', 'analysis'],
+        choices=['api', 'analytics', 'thresholds', 'classification', 'dashboard', 'pacer', 'processor', 'analysis'],
         help='Specific module to test (default: all)'
     )
     parser.add_argument(

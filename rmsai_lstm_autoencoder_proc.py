@@ -87,19 +87,43 @@ class RMSAIConfig:
         self.embedding_dim = 128  # Match actual model output
 
         # ECG leads configuration
-        self.available_leads = ['ECG1', 'ECG2', 'ECG3', 'aVR', 'aVL', 'aVF', 'vVX']
+        #self.available_leads = ['ECG1', 'ECG2', 'ECG3', 'aVR', 'aVL', 'aVF', 'vVX']
+        self.available_leads = ['ECG2']
         # Default to all leads, but can be configured to process subset
         self.selected_leads = self.available_leads.copy()  # Process all by default
+
+        # Model loading configuration
+        self.model_loading_method = "auto"  # "auto", "method1", "method2", "method3"
 
         # Anomaly detection thresholds
         self.anomaly_threshold = 0.1  # Base threshold for MSE
         self.condition_thresholds = {
-            'Normal': 0.05,
-            'Tachycardia': 0.08,
-            'Bradycardia': 0.07,
-            'Atrial Fibrillation (PTB-XL)': 0.12,
-            'Ventricular Tachycardia (MIT-BIH)': 0.15
+            'Normal': 0.8,  # Based on observed avg score of 0.6970
+            'Tachycardia': 0.85,  # Based on observed avg score of 0.6378
+            'Bradycardia': 0.85,  # Same as Tachycardia
+            'Atrial Fibrillation (PTB-XL)': 0.9,  # Based on observed avg score of 0.6970
+            'Ventricular Tachycardia (MIT-BIH)': 1.0  # Based on observed avg score of 0.8742
         }
+
+        # Adaptive threshold configuration
+        self.enable_adaptive_thresholds = False # True
+        self.adaptation_rate = 0.1  # How quickly to adapt (0.0-1.0)
+        self.min_samples_for_adaptation = 10  # Minimum samples before adapting
+        self.threshold_multipliers = {  # Safety bounds
+            'Normal': (0.5, 2.0),      # Can adjust between 50%-200% of base
+            'Tachycardia': (0.8, 1.5),
+            'Bradycardia': (0.8, 1.5),
+            'Atrial Fibrillation (PTB-XL)': (0.9, 1.3),
+            'Ventricular Tachycardia (MIT-BIH)': (0.95, 1.2)
+        }
+
+        # Running statistics for adaptive thresholds
+        self.condition_scores = {}  # Track scores per condition
+        self.condition_counts = {}  # Track sample counts per condition
+
+        # Heart rate ranges for Tachy/Brady classification
+        self.bradycardia_max_hr = 60   # <= 60 BPM is bradycardia
+        self.tachycardia_min_hr = 100  # >= 100 BPM is tachycardia
 
         # Processing configuration
         self.batch_size = 1
@@ -242,8 +266,13 @@ class ModelManager:
             else:
                 chunk = np.pad(chunk, (0, self.config.seq_len - len(chunk)), mode='constant')
 
-        # Normalize the chunk
-        chunk_normalized = self.scaler.fit_transform(chunk.reshape(-1, 1)).flatten()
+        # Normalize the chunk (use transform only, don't refit on every chunk)
+        if not hasattr(self.scaler, 'scale_') or self.scaler.scale_ is None:
+            # First time - fit the scaler
+            chunk_normalized = self.scaler.fit_transform(chunk.reshape(-1, 1)).flatten()
+        else:
+            # Subsequent times - just transform
+            chunk_normalized = self.scaler.transform(chunk.reshape(-1, 1)).flatten()
 
         # Convert to tensor and reshape for LSTM: [batch_size, seq_len, n_features]
         chunk_tensor = torch.FloatTensor(chunk_normalized).to(self.device)
@@ -281,16 +310,17 @@ class ModelManager:
 
     def detect_anomaly(self, original: np.ndarray, reconstructed: np.ndarray,
                       condition: str = None) -> Tuple[bool, float]:
-        """Detect anomaly based on reconstruction error"""
+        """Detect anomaly based on reconstruction error with adaptive thresholds"""
         try:
             # Calculate Mean Squared Error
             mse = np.mean((original - reconstructed) ** 2)
 
-            # Get threshold based on condition
-            if condition and condition in self.config.condition_thresholds:
-                threshold = self.config.condition_thresholds[condition]
-            else:
-                threshold = self.config.anomaly_threshold
+            # Update adaptive threshold statistics
+            if self.config.enable_adaptive_thresholds and condition:
+                self._update_condition_statistics(condition, mse)
+
+            # Get current threshold (possibly adapted)
+            threshold = self._get_adaptive_threshold(condition)
 
             is_anomaly = mse > threshold
 
@@ -299,6 +329,100 @@ class ModelManager:
         except Exception as e:
             logger.error(f"Error in anomaly detection: {e}")
             return False, 0.0
+
+    def _update_condition_statistics(self, condition: str, score: float):
+        """Update running statistics for adaptive thresholds"""
+        if condition not in self.config.condition_scores:
+            self.config.condition_scores[condition] = []
+            self.config.condition_counts[condition] = 0
+
+        self.config.condition_scores[condition].append(score)
+        self.config.condition_counts[condition] += 1
+
+        # Keep only recent scores (sliding window of 100 samples)
+        if len(self.config.condition_scores[condition]) > 100:
+            self.config.condition_scores[condition].pop(0)
+
+    def _get_adaptive_threshold(self, condition: str = None) -> float:
+        """Get current threshold (base or adapted)"""
+        if not self.config.enable_adaptive_thresholds or not condition:
+            return self.config.condition_thresholds.get(condition, self.config.anomaly_threshold)
+
+        base_threshold = self.config.condition_thresholds.get(condition, self.config.anomaly_threshold)
+
+        # Check if we have enough samples to adapt
+        if (condition not in self.config.condition_counts or
+            self.config.condition_counts[condition] < self.config.min_samples_for_adaptation):
+            return base_threshold
+
+        # Calculate adaptive threshold based on observed scores
+        scores = self.config.condition_scores[condition]
+        if not scores:
+            return base_threshold
+
+        # Use 75th percentile as adaptive threshold
+        adaptive_threshold = np.percentile(scores, 75)
+
+        # Apply adaptation rate (blend with base threshold)
+        blended_threshold = (
+            base_threshold * (1 - self.config.adaptation_rate) +
+            adaptive_threshold * self.config.adaptation_rate
+        )
+
+        # Apply safety bounds
+        if condition in self.config.threshold_multipliers:
+            min_mult, max_mult = self.config.threshold_multipliers[condition]
+            min_threshold = base_threshold * min_mult
+            max_threshold = base_threshold * max_mult
+            blended_threshold = np.clip(blended_threshold, min_threshold, max_threshold)
+
+        return blended_threshold
+
+    def get_threshold_status(self) -> Dict[str, Dict[str, float]]:
+        """Get current threshold status for monitoring"""
+        status = {}
+        for condition in self.config.condition_thresholds:
+            base_threshold = self.config.condition_thresholds[condition]
+            current_threshold = self._get_adaptive_threshold(condition)
+            sample_count = self.config.condition_counts.get(condition, 0)
+            avg_score = (np.mean(self.config.condition_scores[condition])
+                        if condition in self.config.condition_scores and self.config.condition_scores[condition]
+                        else 0.0)
+
+            status[condition] = {
+                'base_threshold': base_threshold,
+                'current_threshold': current_threshold,
+                'sample_count': sample_count,
+                'avg_score': avg_score,
+                'adaptation_ratio': current_threshold / base_threshold if base_threshold > 0 else 1.0
+            }
+        return status
+
+    def classify_anomaly_by_heart_rate(self, original_condition: str, heart_rate: float,
+                                     is_anomaly: bool, error_score: float) -> str:
+        """Classify anomaly type based on heart rate for Tachy/Brady disambiguation"""
+        if not is_anomaly:
+            return "normal"
+
+        # If it's a specific non-rhythm condition, keep original classification
+        if original_condition in ['Atrial Fibrillation (PTB-XL)', 'Ventricular Tachycardia (MIT-BIH)']:
+            return original_condition
+
+        # For rhythm-based anomalies, use heart rate to classify
+        if heart_rate <= self.config.bradycardia_max_hr:
+            return 'Bradycardia'
+        elif heart_rate >= self.config.tachycardia_min_hr:
+            return 'Tachycardia'
+        else:
+            # Normal heart rate range (61-99 BPM) but anomalous pattern
+            # Use higher threshold between Tachy/Brady for classification
+            tachy_threshold = self._get_adaptive_threshold('Tachycardia')
+            brady_threshold = self._get_adaptive_threshold('Bradycardia')
+
+            if error_score > max(tachy_threshold, brady_threshold):
+                return 'Unknown Arrhythmia'  # Significant anomaly in normal HR range
+            else:
+                return 'Normal'  # False positive, likely normal variation
 
 class VectorDatabase:
     """Manages ChromaDB vector database operations"""
@@ -503,7 +627,7 @@ class ECGChunkProcessor:
 
     def process_chunk(self, chunk_data: np.ndarray, chunk_id: str,
                      event_id: str, source_file: str, lead_name: str,
-                     condition: str = None) -> Dict[str, Any]:
+                     condition: str = None, heart_rate: float = 0) -> Dict[str, Any]:
         """Process a single ECG chunk"""
         try:
             logger.debug(f"Processing chunk {chunk_id} from {lead_name}")
@@ -519,9 +643,15 @@ class ECGChunkProcessor:
                 chunk_data, reconstructed, condition
             )
 
-            # 4. Determine anomaly type
-            anomaly_status = "anomaly" if is_anomaly else "normal"
-            anomaly_type = condition if is_anomaly and condition else None
+            # 4. Determine anomaly type using heart rate-based classification
+            if is_anomaly:
+                anomaly_type = self.model_manager.classify_anomaly_by_heart_rate(
+                    condition, heart_rate, is_anomaly, error_score
+                )
+                anomaly_status = "anomaly"
+            else:
+                anomaly_type = None
+                anomaly_status = "normal"
 
             # 5. Store embedding in vector database
             vector_metadata = {
@@ -566,7 +696,10 @@ class ECGChunkProcessor:
                 "vector_id": vector_id
             }
 
-            logger.info(f"Processed {chunk_id}: {anomaly_status} (score: {error_score:.4f})")
+            if anomaly_type:
+                logger.info(f"Processed {chunk_id}: {anomaly_status} - {anomaly_type} (score: {error_score:.4f}, HR: {heart_rate})")
+            else:
+                logger.info(f"Processed {chunk_id}: {anomaly_status} (score: {error_score:.4f})")
             return result
 
         except Exception as e:
@@ -681,6 +814,7 @@ class HDF5FileProcessor:
                     step_size = self.chunk_processor.config.step_size   # 70
 
                     chunks_processed = 0
+                    error_scores = []
                     for chunk_start in range(0, len(ecg_data) - chunk_size + 1, step_size):
                         ecg_chunk = ecg_data[chunk_start:chunk_start + chunk_size]
 
@@ -694,19 +828,29 @@ class HDF5FileProcessor:
                             event_id=event_key,
                             source_file=source_file,
                             lead_name=lead_name,
-                            condition=condition
+                            condition=condition,
+                            heart_rate=heart_rate
                         )
 
                         if 'error' in result:
                             logger.error(f"Failed to process {chunk_id}: {result['error']}")
                         else:
                             logger.debug(f"Successfully processed {chunk_id}")
+                            # Collect error score for average calculation
+                            if 'error_score' in result:
+                                error_scores.append(result['error_score'])
 
                         chunks_processed += 1
 
-                    # Log actual vs expected chunk count
+                    # Calculate average error score
+                    avg_error_score = sum(error_scores) / len(error_scores) if error_scores else 0.0
+
+                    # Get current adaptive threshold for this condition
+                    current_threshold = self.chunk_processor.model_manager._get_adaptive_threshold(condition)
+
+                    # Log actual vs expected chunk count with average error score and threshold
                     expected_chunks = self.chunk_processor.config.max_chunks_per_lead
-                    logger.info(f"Processed {chunks_processed}/{expected_chunks} chunks from {lead_name} in {event_key}")
+                    logger.info(f"Processed {chunks_processed}/{expected_chunks} chunks from {lead_name} in {event_key} (avg score: {avg_error_score:.4f}, threshold: {current_threshold:.4f})")
 
                     if chunks_processed != expected_chunks:
                         logger.warning(f"Chunk count mismatch for {lead_name}: got {chunks_processed}, expected {expected_chunks}")
