@@ -1223,6 +1223,1534 @@ class RMSAIDashboard:
 
         return ground_truth
 
+    def _get_lead_configuration(self) -> list:
+        """Get ECG lead configuration from API"""
+        try:
+            import requests
+
+            # Try to get lead configuration from API
+            response = requests.get(f"{self.api_url}/api/v1/config/leads", timeout=5)
+            if response.status_code == 200:
+                config_data = response.json()
+                return config_data.get('selected_leads', [])
+            else:
+                # Fallback to default leads if API call fails
+                return self.selected_leads
+        except Exception as e:
+            # Fallback to default leads if API is not available
+            return self.selected_leads
+
+    def _calculate_data_quality_score(self, signal_data: np.ndarray, sampling_rate: int = 500) -> float:
+        """
+        Calculate data quality score for ECG signal based on multiple factors
+        Returns score from 0-100 (higher is better)
+        """
+        import numpy as np
+
+        if len(signal_data) == 0:
+            return 0.0
+
+        try:
+            # Convert to numpy array if not already
+            signal = np.array(signal_data)
+
+            # 1. Signal completeness (no NaN/inf values)
+            completeness_score = (np.sum(np.isfinite(signal)) / len(signal)) * 100
+
+            # 2. Signal range and saturation check
+            signal_range = np.ptp(signal[np.isfinite(signal)]) if np.any(np.isfinite(signal)) else 0
+            # Typical ECG range is -5mV to +5mV, but varies by lead
+            range_score = min(100, (signal_range / 10.0) * 100) if signal_range > 0 else 0
+
+            # 3. Noise estimation using high-frequency components
+            if len(signal) > 1:
+                # Simple noise estimation using differences
+                diff_signal = np.diff(signal[np.isfinite(signal)])
+                noise_level = np.std(diff_signal) if len(diff_signal) > 0 else 0
+                # Lower noise = higher score (inverse relationship)
+                noise_score = max(0, 100 - (noise_level * 20))
+            else:
+                noise_score = 0
+
+            # 4. Artifact detection (sudden spikes)
+            if len(signal) > 10:
+                # Detect outliers using z-score
+                z_scores = np.abs((signal - np.mean(signal)) / (np.std(signal) + 1e-10))
+                artifact_ratio = np.sum(z_scores > 4) / len(signal)  # Samples with z-score > 4
+                artifact_score = max(0, 100 - (artifact_ratio * 200))
+            else:
+                artifact_score = 100
+
+            # 5. Signal stability (check for lead-off or disconnection)
+            if len(signal) > sampling_rate:  # At least 1 second of data
+                # Check for flat-line segments
+                segment_size = sampling_rate // 10  # 0.1 second segments
+                flat_segments = 0
+                for i in range(0, len(signal) - segment_size, segment_size):
+                    segment = signal[i:i + segment_size]
+                    if np.std(segment) < 0.01:  # Very low variance = flat line
+                        flat_segments += 1
+
+                total_segments = (len(signal) // segment_size)
+                flatline_ratio = flat_segments / total_segments if total_segments > 0 else 0
+                stability_score = max(0, 100 - (flatline_ratio * 100))
+            else:
+                stability_score = 50  # Neutral score for short signals
+
+            # Weighted average of all quality metrics
+            weights = {
+                'completeness': 0.3,
+                'range': 0.2,
+                'noise': 0.2,
+                'artifact': 0.15,
+                'stability': 0.15
+            }
+
+            overall_score = (
+                completeness_score * weights['completeness'] +
+                range_score * weights['range'] +
+                noise_score * weights['noise'] +
+                artifact_score * weights['artifact'] +
+                stability_score * weights['stability']
+            )
+
+            return max(0, min(100, overall_score))
+
+        except Exception as e:
+            # Return neutral score if calculation fails
+            return 50.0
+
+    def _extract_event_report_data(self, patient_id: str, event_id: str, source_file: str) -> Dict:
+        """Extract comprehensive event data from HDF5 file for detailed reporting"""
+        report_data = {
+            'device_info': {},
+            'patient_info': {},
+            'event_info': {},
+            'ecg_data': {},
+            'vitals': {},
+            'waveforms': {},
+            'analysis_info': {}
+        }
+
+        try:
+            if not os.path.exists(source_file):
+                return report_data
+
+            with h5py.File(source_file, 'r') as f:
+                # Extract metadata from the actual structure
+                if 'metadata' in f:
+                    metadata = f['metadata']
+
+                    # Extract all metadata fields dynamically
+                    for key in metadata.keys():
+                        try:
+                            item = metadata[key]
+                            if isinstance(item, h5py.Dataset):
+                                value = item[()]
+                                if isinstance(value, bytes):
+                                    value = value.decode('utf-8')
+
+                                # Categorize the metadata
+                                if key == 'device_info':
+                                    report_data['device_info']['device_info'] = value
+                                elif key == 'data_quality_score':
+                                    report_data['data_quality_score'] = value
+                                elif key == 'patient_id':
+                                    report_data['patient_info']['patient_id'] = value
+                                else:
+                                    # Store other metadata in device_info or event_info
+                                    if 'sampling_rate' in key or 'alarm' in key or 'seconds' in key:
+                                        report_data['event_info'][key] = value
+                                    else:
+                                        report_data['device_info'][key] = value
+
+                            elif isinstance(item, h5py.Group):
+                                # Handle groups if any exist
+                                group_data = {}
+                                for subkey in item.keys():
+                                    try:
+                                        subvalue = item[subkey][()]
+                                        if isinstance(subvalue, bytes):
+                                            subvalue = subvalue.decode('utf-8')
+                                        group_data[subkey] = subvalue
+                                    except:
+                                        pass
+
+                                if group_data:
+                                    if key == 'device_info':
+                                        report_data['device_info'].update(group_data)
+                                    else:
+                                        report_data['device_info'][key] = group_data
+
+                        except Exception as e:
+                            print(f"Error extracting metadata {key}: {e}")
+
+                    # Ensure patient_id is set
+                    if not report_data['patient_info'].get('patient_id'):
+                        report_data['patient_info']['patient_id'] = patient_id
+
+                # Extract event-specific data
+                if event_id in f:
+                    event_group = f[event_id]
+
+                    # Event information from attributes (Ground Truth)
+                    if hasattr(event_group, 'attrs'):
+                        for attr_name in event_group.attrs.keys():
+                            val = event_group.attrs[attr_name]
+                            if isinstance(val, bytes):
+                                val = val.decode('utf-8')
+                            report_data['event_info'][attr_name] = val
+
+                    # Extract UUID and timestamp from datasets if available
+                    if 'uuid' in event_group:
+                        try:
+                            uuid_val = event_group['uuid'][()]
+                            if isinstance(uuid_val, bytes):
+                                uuid_val = uuid_val.decode('utf-8')
+                            report_data['event_info']['uuid'] = uuid_val
+                        except Exception as e:
+                            print(f"Error extracting UUID: {e}")
+
+                    # Extract event timestamp from /event_xxx/timestamp dataset
+                    if 'timestamp' in event_group:
+                        try:
+                            timestamp_val = event_group['timestamp'][()]
+                            # Store as event_timestamp to prioritize it over any other timestamp
+                            report_data['event_info']['event_timestamp'] = timestamp_val
+                            print(f"Extracted event timestamp: {timestamp_val}")
+                        except Exception as e:
+                            print(f"Error extracting event timestamp: {e}")
+
+                    # ECG Lead data with quality analysis (from /ecg/ group)
+                    ecg_leads = {}
+                    total_data_quality_score = 0
+                    valid_leads = 0
+
+                    if 'ecg' in event_group:
+                        ecg_group = event_group['ecg']
+
+                        for lead_name in ecg_group.keys():
+                            if not lead_name.startswith('pacer'):  # Skip pacer info datasets
+                                try:
+                                    lead_dataset = ecg_group[lead_name]
+                                    lead_data = lead_dataset[:]
+                                    sampling_rate = lead_dataset.attrs.get('sampling_rate', 200) if hasattr(lead_dataset, 'attrs') else 200
+
+                                    # Calculate data quality score for this lead
+                                    quality_score = self._calculate_data_quality_score(lead_data, sampling_rate)
+
+                                    ecg_leads[lead_name] = {
+                                        'data': lead_data,
+                                        'length': len(lead_data),
+                                        'sampling_rate': sampling_rate,
+                                        'quality_score': quality_score
+                                    }
+
+                                    total_data_quality_score += quality_score
+                                    valid_leads += 1
+                                except Exception as e:
+                                    print(f"Error processing ECG lead {lead_name}: {e}")
+
+                        # Extract pacer information if available
+                        if 'pacer_info' in ecg_group:
+                            try:
+                                report_data['ecg_data']['pacer_info'] = ecg_group['pacer_info'][()]
+                            except:
+                                pass
+                        if 'pacer_offset' in ecg_group:
+                            try:
+                                report_data['ecg_data']['pacer_offset'] = ecg_group['pacer_offset'][()]
+                            except:
+                                pass
+
+                    report_data['ecg_data']['leads'] = ecg_leads
+
+                    # Overall data quality score
+                    if valid_leads > 0:
+                        report_data['ecg_data']['overall_quality_score'] = total_data_quality_score / valid_leads
+                    else:
+                        report_data['ecg_data']['overall_quality_score'] = 0
+
+                    # Vitals data (from /vitals/ group)
+                    vitals_data = {}
+                    if 'vitals' in event_group:
+                        vitals_group = event_group['vitals']
+
+                        for vital_name in vitals_group.keys():
+                            try:
+                                vital_group = vitals_group[vital_name]
+                                vital_info = {}
+
+                                # Extract all available data for this vital
+                                for dataset_name in vital_group.keys():
+                                    try:
+                                        value = vital_group[dataset_name][()]
+                                        if isinstance(value, bytes):
+                                            value = value.decode('utf-8')
+                                        vital_info[dataset_name] = value
+                                    except:
+                                        pass
+
+                                if vital_info:  # Only add if we got some data
+                                    vitals_data[vital_name] = vital_info
+
+                            except Exception as e:
+                                print(f"Error processing vital {vital_name}: {e}")
+
+                    report_data['vitals'] = vitals_data
+
+                    # Waveform data (PPG, Respiratory)
+                    waveforms = {}
+
+                    # PPG data from /ppg/ group
+                    if 'ppg' in event_group:
+                        ppg_group = event_group['ppg']
+                        for key in ppg_group.keys():
+                            try:
+                                waveform_data = ppg_group[key][:]
+                                sampling_rate = ppg_group[key].attrs.get('sampling_rate', 300) if hasattr(ppg_group[key], 'attrs') else 300
+                                waveforms[f"PPG_{key}"] = {
+                                    'data': waveform_data,
+                                    'sampling_rate': sampling_rate,
+                                    'length': len(waveform_data)
+                                }
+                            except Exception as e:
+                                print(f"Error processing PPG data {key}: {e}")
+
+                    # Respiratory data from /resp/ group
+                    if 'resp' in event_group:
+                        resp_group = event_group['resp']
+                        for key in resp_group.keys():
+                            try:
+                                waveform_data = resp_group[key][:]
+                                sampling_rate = resp_group[key].attrs.get('sampling_rate', 133) if hasattr(resp_group[key], 'attrs') else 133
+                                waveforms[f"RESP_{key}"] = {
+                                    'data': waveform_data,
+                                    'sampling_rate': sampling_rate,
+                                    'length': len(waveform_data)
+                                }
+                            except Exception as e:
+                                print(f"Error processing Respiratory data {key}: {e}")
+
+                    report_data['waveforms'] = waveforms
+
+                # Ensure event UUID is available
+                if 'uuid' not in report_data['event_info']:
+                    report_data['event_info']['uuid'] = f"{patient_id}_{event_id}"
+
+        except Exception as e:
+            st.warning(f"Error extracting report data: {e}")
+
+        return report_data
+
+    def _render_event_report(self, patient_id: str, event_id: str, source_file: str, ai_data: Dict):
+        """Render comprehensive event report"""
+        st.header(f"📋 Event Report: {event_id}")
+
+        # Extract comprehensive data from HDF5
+        report_data = self._extract_event_report_data(patient_id, event_id, source_file)
+
+        # Information Section
+        st.subheader("📊 Information Section")
+
+        # Create structured DataFrames for Information Section
+        info_col1, info_col2 = st.columns(2)
+
+        with info_col1:
+            # Device Information DataFrame
+            st.markdown("**Device Information:**")
+            device_info = report_data.get('device_info', {})
+            if device_info:
+                device_rows = []
+                for key, value in device_info.items():
+                    device_rows.append({
+                        'Parameter': key.replace('_', ' ').title(),
+                        'Value': str(value)
+                    })
+                device_df = pd.DataFrame(device_rows)
+                st.dataframe(device_df, use_container_width=True, hide_index=True)
+            else:
+                st.info("No device information available")
+
+            # Patient and Quality Information DataFrame
+            st.markdown("**Patient & Quality Information:**")
+            patient_quality_rows = []
+
+            # Patient ID
+            patient_quality_rows.append({
+                'Parameter': 'Patient ID',
+                'Value': patient_id
+            })
+
+            # Data Quality Score
+            metadata_quality = report_data.get('data_quality_score', None)
+            ecg_data = report_data.get('ecg_data', {})
+            calculated_quality = ecg_data.get('overall_quality_score', 0)
+
+            if metadata_quality is not None:
+                overall_quality = metadata_quality
+                quality_color = "🟢" if overall_quality >= 80 else "🟡" if overall_quality >= 60 else "🔴"
+                quality_source = "HDF5 Metadata"
+            else:
+                overall_quality = calculated_quality
+                quality_color = "🟢" if overall_quality >= 80 else "🟡" if overall_quality >= 60 else "🔴"
+                quality_source = "Calculated"
+
+            patient_quality_rows.append({
+                'Parameter': 'Data Quality Score',
+                'Value': f"{quality_color} {overall_quality:.1f}/100 ({quality_source})"
+            })
+
+            patient_quality_df = pd.DataFrame(patient_quality_rows)
+            st.dataframe(patient_quality_df, use_container_width=True, hide_index=True)
+
+        with info_col2:
+            # Event Information DataFrame
+            st.markdown("**Event Information:**")
+            event_info = report_data.get('event_info', {})
+            event_rows = []
+
+            # Event name/condition
+            condition = event_info.get('condition', ai_data.get('event_condition', 'Unknown'))
+            event_rows.append({
+                'Parameter': 'Event Condition',
+                'Value': condition
+            })
+
+            # Event UUID
+            event_uuid = event_info.get('uuid', f"{patient_id}_{event_id}")
+            event_rows.append({
+                'Parameter': 'Event UUID',
+                'Value': event_uuid
+            })
+
+            # Event timestamp
+            if 'event_timestamp' in event_info:
+                event_timestamp = pd.to_datetime(event_info['event_timestamp'], unit='s')
+                event_rows.append({
+                    'Parameter': 'Event Time',
+                    'Value': event_timestamp.strftime('%Y-%m-%d %H:%M:%S')
+                })
+            elif 'timestamp' in event_info:
+                event_timestamp = pd.to_datetime(event_info['timestamp'], unit='s')
+                event_rows.append({
+                    'Parameter': 'Event Time',
+                    'Value': event_timestamp.strftime('%Y-%m-%d %H:%M:%S')
+                })
+
+            # Heart rate
+            if 'heart_rate' in event_info:
+                event_rows.append({
+                    'Parameter': 'Heart Rate',
+                    'Value': f"{event_info['heart_rate']} BPM"
+                })
+
+            # Additional event details
+            for key, value in event_info.items():
+                if key not in ['condition', 'uuid', 'event_timestamp', 'timestamp', 'heart_rate']:
+                    key_display = key.replace('_', ' ').title()
+
+                    # Format specific fields nicely
+                    if 'sampling_rate' in key:
+                        formatted_value = f"{value} Hz"
+                    elif 'alarm_time_epoch' in key:
+                        try:
+                            alarm_time = pd.to_datetime(value, unit='s')
+                            formatted_value = alarm_time.strftime('%Y-%m-%d %H:%M:%S')
+                            key_display = "Alarm Time"
+                        except:
+                            formatted_value = str(value)
+                    elif 'seconds' in key:
+                        formatted_value = f"{value}s"
+                    else:
+                        formatted_value = str(value)
+
+                    event_rows.append({
+                        'Parameter': key_display,
+                        'Value': formatted_value
+                    })
+
+            # Calculate and show monitoring start time
+            if 'alarm_time_epoch' in event_info and 'alarm_offset_seconds' in event_info:
+                try:
+                    alarm_time = float(event_info['alarm_time_epoch'])
+                    offset = float(event_info['alarm_offset_seconds'])
+                    monitoring_start = pd.to_datetime(alarm_time - offset, unit='s')
+                    event_rows.append({
+                        'Parameter': 'Monitoring Start Time',
+                        'Value': monitoring_start.strftime('%Y-%m-%d %H:%M:%S')
+                    })
+                except:
+                    pass
+
+            if event_rows:
+                event_df = pd.DataFrame(event_rows)
+                st.dataframe(event_df, use_container_width=True, hide_index=True)
+            else:
+                st.info("No event information available")
+
+        # Diagnosis Section
+        st.subheader("🔬 Diagnosis Section")
+
+        # ECG Lead Configuration Summary DataFrame
+        st.markdown("**ECG Lead Configuration:**")
+        ecg_data = report_data.get('ecg_data', {})
+        leads = ecg_data.get('leads', {})
+
+        if leads:
+            # Get configured leads from API
+            configured_leads = self._get_lead_configuration()
+
+            # Create ECG Configuration Summary
+            config_rows = []
+            config_rows.append({
+                'Configuration': 'ECG Leads Used for AI Analysis',
+                'Value': ', '.join(configured_leads) if configured_leads else 'Not available'
+            })
+            config_rows.append({
+                'Configuration': 'Available ECG Leads in Data',
+                'Value': ', '.join(leads.keys())
+            })
+
+            if configured_leads:
+                available_configured = [lead for lead in configured_leads if lead in leads.keys()]
+                config_rows.append({
+                    'Configuration': 'Configured Leads with Data',
+                    'Value': ', '.join(available_configured) if available_configured else 'None'
+                })
+
+            config_df = pd.DataFrame(config_rows)
+            st.dataframe(config_df, use_container_width=True, hide_index=True)
+
+            # Get common data specifications from first lead
+            first_lead_info = next(iter(leads.values()))
+            common_data_length = first_lead_info.get('length', 0)
+            common_sampling_rate = first_lead_info.get('sampling_rate', 200)
+
+            # Display ECG data specifications once
+            st.markdown(f"**ECG Data Specifications:** {common_data_length:,} samples per lead at {common_sampling_rate} Hz sampling rate")
+
+            # ECG Lead Analysis DataFrame (without repetitive data length/sampling rate)
+            st.markdown("**ECG Lead Quality & Anomaly Analysis:**")
+            lead_analysis_rows = []
+
+            for lead_name, lead_info in leads.items():
+                quality_score = lead_info.get('quality_score', 0)
+                quality_icon = "🟢" if quality_score >= 80 else "🟡" if quality_score >= 60 else "🔴"
+
+                # Mark if this lead is configured for AI analysis
+                is_configured = lead_name in configured_leads if configured_leads else False
+                config_status = "✅ AI Configured" if is_configured else "⭕ Not Configured"
+
+                # This would be calculated from actual AI analysis results
+                anomaly_percentage = 15  # Placeholder
+
+                lead_analysis_rows.append({
+                    'ECG Lead': lead_name,
+                    'AI Configuration': config_status,
+                    'Quality Score': f"{quality_icon} {quality_score:.1f}/100",
+                    'Anomalous Chunks': f"{anomaly_percentage}%"
+                })
+
+            if lead_analysis_rows:
+                lead_analysis_df = pd.DataFrame(lead_analysis_rows)
+                st.dataframe(lead_analysis_df, use_container_width=True, hide_index=True)
+
+            # ECG Waveform plots placeholder
+            st.info("📈 ECG Waveform plots would be displayed here (7-lead ECG with anomaly chunk highlighting)")
+
+            # ECG Chunk Analysis Table - Only Anomalous Chunks
+            st.markdown("**ECG Chunk Analysis (Anomalous Chunks Only):**")
+            try:
+                # Get chunk-level data for this specific event from database - only anomalous chunks
+                conn = sqlite3.connect(self.db_path)
+                query = """
+                    SELECT lead_name, event_id, chunk_id, anomaly_status, anomaly_type, error_score
+                    FROM chunks
+                    WHERE event_id = ? AND source_file LIKE ? AND anomaly_status = 'anomaly'
+                    ORDER BY lead_name, chunk_id
+                """
+                chunk_data = pd.read_sql_query(query, conn, params=[event_id, f"%{patient_id}%"])
+                conn.close()
+
+                if not chunk_data.empty:
+                    chunk_analysis_rows = []
+
+                    # Constants for offset calculation - corrected for 12-second ECG strips
+                    sampling_rate = 200        # Hz - actual ECG sampling rate
+                    total_strip_duration = 12  # seconds
+                    total_samples = sampling_rate * total_strip_duration  # 2400 samples
+
+                    # For a 12-second strip with chunk numbers like 0, 1120, 2100:
+                    # If chunk 2100 should be near the end (around 10-11 seconds):
+                    # Then each chunk number unit ≈ 12 seconds / 2400 = 0.005 seconds
+                    # Or more likely: chunk_number represents sample number directly
+
+                    # Try direct sample-to-time conversion
+                    # chunk_number might be the sample number within the 12-second strip
+
+                    for _, chunk_row in chunk_data.iterrows():
+                        # Extract chunk number from chunk_id
+                        chunk_id_raw = chunk_row['chunk_id']
+                        offset_time = "0.0s"  # Default fallback
+
+                        try:
+                            # Handle different data types
+                            if chunk_id_raw is None or pd.isna(chunk_id_raw):
+                                chunk_id = 0
+                            elif isinstance(chunk_id_raw, str):
+                                cleaned = chunk_id_raw.strip()
+                                if cleaned.isdigit():
+                                    chunk_id = int(cleaned)
+                                elif cleaned.startswith('chunk_'):
+                                    # Handle chunk_eventid_chunknum format
+                                    parts = cleaned.split('_')
+                                    if len(parts) >= 3:  # chunk_eventid_chunknum
+                                        chunk_num_str = parts[-1]  # Get last part (chunk number)
+                                        if chunk_num_str.isdigit():
+                                            chunk_id = int(chunk_num_str)
+                                        else:
+                                            raise ValueError(f"Last part '{chunk_num_str}' is not a digit")
+                                    else:
+                                        raise ValueError(f"Unexpected chunk format: '{cleaned}'")
+                                else:
+                                    # Try to extract all digits and use the last one
+                                    import re
+                                    digits = re.findall(r'\d+', cleaned)
+                                    if digits:
+                                        chunk_id = int(digits[-1])  # Use last number instead of first
+                                    else:
+                                        raise ValueError(f"No digits found in '{cleaned}'")
+                            elif isinstance(chunk_id_raw, (int, float)):
+                                chunk_id = int(chunk_id_raw)
+                            else:
+                                raise ValueError(f"Unexpected type: {type(chunk_id_raw)}")
+
+                            # Calculate offset - assume chunk_id is the sample number within the strip
+                            offset_seconds = chunk_id / sampling_rate
+
+                            # Clamp to 12-second strip duration for sanity check
+                            if offset_seconds > total_strip_duration:
+                                offset_seconds = offset_seconds % total_strip_duration
+
+                            # Format offset time
+                            offset_time = f"{offset_seconds:.1f}s"
+
+                        except Exception as e:
+                            # Fallback - try to extract chunk number
+                            try:
+                                import re
+                                chunk_str = str(chunk_id_raw)
+                                if chunk_str.startswith('chunk_'):
+                                    # Split by underscore and get the last part
+                                    parts = chunk_str.split('_')
+                                    if len(parts) >= 3:
+                                        chunk_id = int(parts[-1])  # Get last part (chunk number)
+                                    else:
+                                        chunk_id = 0
+                                else:
+                                    # Extract last number
+                                    numbers = re.findall(r'\d+', chunk_str)
+                                    chunk_id = int(numbers[-1]) if numbers else 0
+
+                                offset_seconds = chunk_id / sampling_rate
+                                # Clamp to 12-second strip
+                                if offset_seconds > total_strip_duration:
+                                    offset_seconds = offset_seconds % total_strip_duration
+                                offset_time = f"{offset_seconds:.1f}s"
+                            except:
+                                offset_time = f"Chunk {chunk_id_raw}"
+
+                        # Format anomaly type
+                        anomaly_type = chunk_row['anomaly_type'] if chunk_row['anomaly_type'] and chunk_row['anomaly_type'] != 'None' else 'Unknown Anomaly'
+
+                        # Format error score safely
+                        try:
+                            error_score = f"{float(chunk_row['error_score']):.4f}"
+                        except (ValueError, TypeError):
+                            error_score = str(chunk_row['error_score'])
+
+                        chunk_analysis_rows.append({
+                            'ECG Lead': chunk_row['lead_name'],
+                            'Chunk ID': chunk_row['chunk_id'],
+                            'Offset of Anomaly in Strip': offset_time,
+                            'Anomaly Type': anomaly_type,
+                            'Error Score': error_score
+                        })
+
+                    if chunk_analysis_rows:
+                        chunk_analysis_df = pd.DataFrame(chunk_analysis_rows)
+                        st.dataframe(chunk_analysis_df, use_container_width=True, hide_index=True)
+                        st.caption(f"📊 Showing {len(chunk_analysis_rows)} anomalous chunks (Sampling rate: {sampling_rate} Hz, Strip duration: {total_strip_duration}s)")
+                    else:
+                        st.info("No anomalous chunks detected for this event")
+                else:
+                    st.info("No anomalous chunks found for this event")
+            except Exception as e:
+                st.warning(f"Could not load chunk analysis data: {e}")
+
+        else:
+            st.warning("No ECG lead data available in HDF5 file")
+
+        # Additional Waveforms DataFrame
+        waveforms = report_data.get('waveforms', {})
+        if waveforms:
+            st.markdown("**Additional Waveforms Summary:**")
+            waveform_rows = []
+
+            for waveform_name, waveform_info in waveforms.items():
+                # Calculate duration in seconds
+                duration = waveform_info['length'] / waveform_info['sampling_rate']
+
+                waveform_rows.append({
+                    'Waveform': waveform_name.replace('_', ' '),
+                    'Samples': f"{waveform_info['length']:,}",
+                    'Sampling Rate': f"{waveform_info['sampling_rate']} Hz",
+                    'Duration': f"{duration:.2f}s"
+                })
+
+            if waveform_rows:
+                waveform_df = pd.DataFrame(waveform_rows)
+                st.dataframe(waveform_df, use_container_width=True, hide_index=True)
+
+            st.info("📊 PPG and Respiratory waveform plots would be displayed here (requires plotting implementation)")
+        else:
+            st.info("No additional waveform data available")
+
+        # Vital Signs DataFrame
+        vitals = report_data.get('vitals', {})
+        if vitals:
+            st.markdown("**Vital Signs Analysis:**")
+            vitals_rows = []
+
+            # Get event timestamp for relative time calculation
+            event_info = report_data.get('event_info', {})
+            event_timestamp = None
+            if 'event_timestamp' in event_info:
+                event_timestamp = pd.to_datetime(event_info['event_timestamp'], unit='s')
+            elif 'timestamp' in event_info:
+                event_timestamp = pd.to_datetime(event_info['timestamp'], unit='s')
+
+            # Define the order of vital signs as requested
+            vital_order = ['HR', 'RespRate', 'SpO2', 'Pulse', 'Temp', 'Systolic', 'Diastolic', 'XL_Posture']
+
+            # Process vitals in the specified order
+            for vital_name in vital_order:
+                if vital_name in vitals:
+                    vital_info = vitals[vital_name]
+
+                    # Format vital name for display
+                    display_name = vital_name.replace('_', ' ').title()
+
+                    # Handle special case for RespRate display name
+                    if vital_name == 'RespRate':
+                        display_name = 'RR (Respiratory Rate)'
+                    elif vital_name == 'HR':
+                        display_name = 'HR (Heart Rate)'
+                    elif vital_name == 'SpO2':
+                        display_name = 'SpO2 (Oxygen Saturation)'
+                    elif vital_name == 'XL_Posture':
+                        display_name = 'XL Posture'
+
+                    # Extract common fields
+                    value = vital_info.get('value', 'N/A')
+                    units = vital_info.get('units', '')
+                    timestamp = vital_info.get('timestamp', 'N/A')
+                    lower_threshold = vital_info.get('lower_threshold', 'N/A')
+                    upper_threshold = vital_info.get('upper_threshold', 'N/A')
+
+                    # Convert timestamp and calculate relative time
+                    formatted_timestamp = 'N/A'
+                    relative_time = 'N/A'
+
+                    if isinstance(timestamp, (int, float)):
+                        try:
+                            vital_timestamp = pd.to_datetime(timestamp, unit='s')
+                            formatted_timestamp = vital_timestamp.strftime('%Y-%m-%d %H:%M:%S')
+
+                            # Calculate relative time difference w.r.t event time
+                            if event_timestamp is not None:
+                                time_diff = vital_timestamp - event_timestamp
+                                total_seconds = int(time_diff.total_seconds())
+
+                                if total_seconds == 0:
+                                    relative_time = "At Event"
+                                elif total_seconds > 0:
+                                    # After event
+                                    if total_seconds < 60:
+                                        relative_time = f"+{total_seconds}s"
+                                    elif total_seconds < 3600:
+                                        minutes = total_seconds // 60
+                                        seconds = total_seconds % 60
+                                        relative_time = f"+{minutes}m {seconds}s" if seconds > 0 else f"+{minutes}m"
+                                    else:
+                                        hours = total_seconds // 3600
+                                        minutes = (total_seconds % 3600) // 60
+                                        relative_time = f"+{hours}h {minutes}m" if minutes > 0 else f"+{hours}h"
+                                else:
+                                    # Before event
+                                    abs_seconds = abs(total_seconds)
+                                    if abs_seconds < 60:
+                                        relative_time = f"-{abs_seconds}s"
+                                    elif abs_seconds < 3600:
+                                        minutes = abs_seconds // 60
+                                        seconds = abs_seconds % 60
+                                        relative_time = f"-{minutes}m {seconds}s" if seconds > 0 else f"-{minutes}m"
+                                    else:
+                                        hours = abs_seconds // 3600
+                                        minutes = (abs_seconds % 3600) // 60
+                                        relative_time = f"-{hours}h {minutes}m" if minutes > 0 else f"-{hours}h"
+                        except:
+                            formatted_timestamp = str(timestamp)
+
+                    # Determine if value is within normal range
+                    status = "Normal"
+                    if (isinstance(value, (int, float)) and
+                        isinstance(lower_threshold, (int, float)) and
+                        isinstance(upper_threshold, (int, float))):
+                        if value < lower_threshold:
+                            status = "⬇️ Low"
+                        elif value > upper_threshold:
+                            status = "⬆️ High"
+                        else:
+                            status = "✅ Normal"
+
+                    vitals_rows.append({
+                        'Vital Sign': display_name,
+                        'Value': f"{value} {units}".strip(),
+                        'Normal Range': f"{lower_threshold}-{upper_threshold} {units}".strip() if lower_threshold != 'N/A' else 'N/A',
+                        'Status': status,
+                        'Relative Time': relative_time,
+                        'Timestamp': formatted_timestamp
+                    })
+
+            if vitals_rows:
+                vitals_df = pd.DataFrame(vitals_rows)
+                st.dataframe(vitals_df, use_container_width=True, hide_index=True)
+            else:
+                st.info("No vital signs data could be parsed")
+        else:
+            st.info("No vital signs data available")
+
+        # Analysis Information Section
+        st.subheader("⚡ Analysis Information")
+
+        analysis_col1, analysis_col2 = st.columns(2)
+
+        with analysis_col1:
+            # AI Analysis Results DataFrame
+            st.markdown("**AI Analysis Results:**")
+            ai_analysis_rows = []
+
+            ai_analysis_rows.append({
+                'Analysis Parameter': 'AI Verdict',
+                'Result': ai_data.get('ai_verdict', 'Unknown')
+            })
+
+            ai_analysis_rows.append({
+                'Analysis Parameter': 'Ground Truth Condition',
+                'Result': ai_data.get('event_condition', 'Unknown')
+            })
+
+            error_score = ai_data.get('error_score', 'N/A')
+            if error_score != 'N/A':
+                ai_analysis_rows.append({
+                    'Analysis Parameter': 'Average Error Score',
+                    'Result': f"{error_score:.4f}" if isinstance(error_score, (int, float)) else str(error_score)
+                })
+            else:
+                ai_analysis_rows.append({
+                    'Analysis Parameter': 'Average Error Score',
+                    'Result': 'N/A'
+                })
+
+            ai_analysis_df = pd.DataFrame(ai_analysis_rows)
+            st.dataframe(ai_analysis_df, use_container_width=True, hide_index=True)
+
+        with analysis_col2:
+            # Processing Information DataFrame
+            st.markdown("**Processing Information:**")
+            processing_rows = []
+
+            # Analysis timestamp
+            analysis_timestamp = ai_data.get('timestamp', 'Unknown')
+            if analysis_timestamp != 'Unknown':
+                try:
+                    if isinstance(analysis_timestamp, str):
+                        formatted_timestamp = pd.to_datetime(analysis_timestamp).strftime('%Y-%m-%d %H:%M:%S')
+                    else:
+                        formatted_timestamp = str(analysis_timestamp)
+                except:
+                    formatted_timestamp = str(analysis_timestamp)
+            else:
+                formatted_timestamp = 'Unknown'
+
+            processing_rows.append({
+                'Processing Parameter': 'Analysis Timestamp',
+                'Value': formatted_timestamp
+            })
+
+            # Processing time placeholder
+            processing_rows.append({
+                'Processing Parameter': 'Time to Analyze',
+                'Value': '[Would be calculated from processing logs]'
+            })
+
+            # Extract model version from device info
+            device_info = report_data.get('device_info', {})
+            model_version = device_info.get('model_version', device_info.get('software_version', device_info.get('ai_model_version', 'Unknown')))
+            processing_rows.append({
+                'Processing Parameter': 'Model Version',
+                'Value': str(model_version)
+            })
+
+            processing_df = pd.DataFrame(processing_rows)
+            st.dataframe(processing_df, use_container_width=True, hide_index=True)
+
+        # Export and Navigation Section
+        st.divider()
+        col1, col2, col3 = st.columns([1, 1, 2])
+
+        with col1:
+            # PDF Export button
+            pdf_data = self._generate_pdf_report(patient_id, event_id, report_data, ai_data)
+            if pdf_data:
+                st.download_button(
+                    label="📄 Export as PDF",
+                    data=pdf_data,
+                    file_name=f"ECG_Report_{patient_id}_{event_id}_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                    mime="application/pdf",
+                    key=f"pdf_export_{event_id}"
+                )
+
+        with col2:
+            # Close button
+            if st.button("🔙 Back to Patient Analysis", key=f"back_from_report_{event_id}"):
+                st.session_state.selected_event_for_report = None
+                st.rerun()
+
+        with col3:
+            # Report metadata
+            st.caption(f"Report generated: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            st.caption("🔒 Confidential Medical Information")
+
+    def _generate_pdf_report(self, patient_id: str, event_id: str, report_data: Dict, ai_data: Dict) -> bytes:
+        """Generate comprehensive PDF report including all Patient Analysis content"""
+        try:
+            from reportlab.lib.pagesizes import letter, A4
+            from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+            from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+            from reportlab.lib.units import inch
+            from reportlab.lib import colors
+            from io import BytesIO
+            import datetime
+
+            # Create PDF in memory
+            buffer = BytesIO()
+            doc = SimpleDocTemplate(buffer, pagesize=A4, topMargin=0.5*inch, bottomMargin=0.5*inch)
+
+            # Get styles
+            styles = getSampleStyleSheet()
+            title_style = ParagraphStyle(
+                'CustomTitle',
+                parent=styles['Heading1'],
+                fontSize=18,
+                textColor=colors.darkblue,
+                alignment=1  # Center alignment
+            )
+
+            heading_style = ParagraphStyle(
+                'CustomHeading',
+                parent=styles['Heading2'],
+                fontSize=14,
+                textColor=colors.darkblue,
+                spaceBefore=12,
+                spaceAfter=6
+            )
+
+            subheading_style = ParagraphStyle(
+                'CustomSubheading',
+                parent=styles['Heading3'],
+                fontSize=12,
+                textColor=colors.darkgreen,
+                spaceBefore=8,
+                spaceAfter=4
+            )
+
+            # Story elements
+            story = []
+
+            # Header
+            story.append(Paragraph("RMSAI ECG Event Analysis Report", title_style))
+            story.append(Spacer(1, 12))
+
+            # === PATIENT ANALYSIS SECTION ===
+            story.append(Paragraph("Patient Analysis Summary", heading_style))
+
+            # Get all patient data from database for comprehensive analysis
+            try:
+                conn = sqlite3.connect(self.db_path)
+                query = "SELECT * FROM chunks WHERE source_file LIKE ?"
+                patient_data = pd.read_sql_query(query, conn, params=[f"%{patient_id}%"])
+                conn.close()
+
+                if not patient_data.empty:
+                    # Extract patient ID and get ground truth
+                    patient_data['patient_id'] = patient_data['source_file'].str.extract(r'([A-Z0-9]+)_\d{4}-\d{2}\.h5')[0]
+                    patient_data = patient_data[patient_data['patient_id'] == patient_id]
+                    ground_truth_conditions = self._get_ground_truth_conditions(patient_data)
+
+                    # Calculate patient summary stats - handle different timestamp column names
+                    agg_dict = {
+                        'anomaly_type': lambda x: [t for t in x if t and t != 'None' and pd.notna(t)],
+                        'anomaly_status': lambda x: (x == 'anomaly').sum(),
+                        'error_score': 'mean',
+                        'chunk_id': 'count'
+                    }
+
+                    # Add timestamp field if it exists
+                    if 'timestamp' in patient_data.columns:
+                        agg_dict['timestamp'] = 'first'
+                    elif 'processing_timestamp' in patient_data.columns:
+                        agg_dict['processing_timestamp'] = 'first'
+
+                    patient_events = patient_data.groupby('event_id', as_index=False).agg(agg_dict).rename(columns={'chunk_id': 'total_chunks'})
+
+                    # AI verdict calculation with severity order
+                    severity_order = {
+                        'Ventricular Tachycardia (MIT-BIH)': 5,
+                        'Atrial Fibrillation (PTB-XL)': 4,
+                        'Unknown Arrhythmia': 3,
+                        'Tachycardia': 2,
+                        'Bradycardia': 1
+                    }
+
+                    def get_ai_verdict(anomaly_types_list):
+                        if not anomaly_types_list:
+                            return "Normal"
+                        unique_anomalies = list(set(anomaly_types_list))
+                        unique_anomalies.sort(key=lambda x: severity_order.get(x, 0), reverse=True)
+                        return ", ".join(unique_anomalies)
+
+                    patient_events['ai_verdict'] = patient_events['anomaly_type'].apply(get_ai_verdict)
+                    patient_events['event_condition'] = patient_events['event_id'].map(ground_truth_conditions).fillna('Unknown')
+
+                    # Patient Summary Statistics
+                    total_events = len(patient_events)
+                    anomaly_events = (patient_events['ai_verdict'] != 'Normal').sum()
+                    avg_error = patient_events['error_score'].mean()
+
+                    # Calculate accuracy
+                    matches = 0
+                    for _, row in patient_events.iterrows():
+                        ai_verdict = row['ai_verdict']
+                        event_condition = row['event_condition']
+                        if ai_verdict == 'Normal' and event_condition in ['Normal', 'Unknown']:
+                            matches += 1
+                        elif ai_verdict != 'Normal' and event_condition != 'Normal' and event_condition != 'Unknown':
+                            matches += 1
+                    accuracy = (matches / total_events) * 100 if total_events > 0 else 0
+
+                    # Patient Summary Table
+                    summary_data = [
+                        ['Metric', 'Value'],
+                        ['Patient ID', patient_id],
+                        ['Total Events', f"{total_events:,}"],
+                        ['AI Detected Anomalies', f"{anomaly_events:,}"],
+                        ['AI Accuracy vs Ground Truth', f"{accuracy:.1f}%"],
+                        ['Average Error Score', f"{avg_error:.4f}"],
+                        ['Report Generated', datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')]
+                    ]
+
+                    summary_table = Table(summary_data, colWidths=[2.5*inch, 3*inch])
+                    summary_table.setStyle(TableStyle([
+                        ('BACKGROUND', (0, 0), (-1, 0), colors.darkblue),
+                        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                        ('FONTSIZE', (0, 0), (-1, 0), 12),
+                        ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                        ('BACKGROUND', (0, 1), (-1, -1), colors.lightblue),
+                        ('GRID', (0, 0), (-1, -1), 1, colors.black)
+                    ]))
+
+                    story.append(summary_table)
+                    story.append(Spacer(1, 12))
+
+                    # Skip the Event Analysis table as requested
+                    story.append(PageBreak())
+
+            except Exception as e:
+                story.append(Paragraph(f"Note: Patient analysis data not available: {e}", styles['Normal']))
+                story.append(Spacer(1, 12))
+
+            # === SPECIFIC EVENT REPORT SECTION ===
+            story.append(Paragraph(f"Detailed Event Report: {event_id}", heading_style))
+
+            # Information Section
+            story.append(Paragraph("Information Section", subheading_style))
+
+            # Device and Patient Info Table
+            device_info = report_data.get('device_info', {})
+            event_info = report_data.get('event_info', {})
+            ecg_data = report_data.get('ecg_data', {})
+
+            info_data = [
+                ['Parameter', 'Value'],
+                ['Patient ID', patient_id],
+                ['Event ID', event_id],
+                ['Event Condition (Ground Truth)', event_info.get('condition', ai_data.get('event_condition', 'Unknown'))],
+                ['AI Verdict', ai_data.get('ai_verdict', 'Unknown')],
+                ['Event UUID', event_info.get('uuid', f"{patient_id}_{event_id}")],
+            ]
+
+            # Add event timestamp with proper formatting
+            if 'event_timestamp' in event_info:
+                event_timestamp = pd.to_datetime(event_info['event_timestamp'], unit='s')
+                info_data.append(['Event Time', event_timestamp.strftime('%Y-%m-%d %H:%M:%S')])
+            elif 'timestamp' in event_info:
+                event_timestamp = pd.to_datetime(event_info['timestamp'], unit='s')
+                info_data.append(['Event Time', event_timestamp.strftime('%Y-%m-%d %H:%M:%S')])
+
+            # Data quality scores
+            metadata_quality = report_data.get('data_quality_score', None)
+            calculated_quality = ecg_data.get('overall_quality_score', 0)
+            overall_quality = metadata_quality if metadata_quality is not None else calculated_quality
+            quality_source = "HDF5 Metadata" if metadata_quality is not None else "Calculated"
+            info_data.append(['Data Quality Score', f"{overall_quality:.1f}/100 ({quality_source})"])
+
+            # Add device info if available
+            for key, value in device_info.items():
+                if key not in ['device_info']:  # Avoid duplicate entries
+                    info_data.append([key.replace('_', ' ').title(), str(value)])
+
+            info_table = Table(info_data, colWidths=[2.5*inch, 3*inch])
+            info_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, 0), 12),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black)
+            ]))
+
+            story.append(info_table)
+            story.append(Spacer(1, 12))
+
+            # Diagnosis Section
+            story.append(Paragraph("Diagnosis Section", subheading_style))
+
+            # ECG Lead Configuration and Analysis
+            leads = ecg_data.get('leads', {})
+            if leads:
+                # Get configured leads from API
+                try:
+                    configured_leads = self._get_lead_configuration()
+                except:
+                    configured_leads = []
+
+                # ECG Configuration Summary
+                config_data = [
+                    ['Configuration', 'Value'],
+                    ['ECG Leads Used for AI Analysis', ', '.join(configured_leads) if configured_leads else 'Not available'],
+                    ['Available ECG Leads in Data', ', '.join(leads.keys())],
+                ]
+
+                if configured_leads:
+                    available_configured = [lead for lead in configured_leads if lead in leads.keys()]
+                    config_data.append(['Configured Leads with Data', ', '.join(available_configured) if available_configured else 'None'])
+
+                config_table = Table(config_data, colWidths=[2.5*inch, 3*inch])
+                config_table.setStyle(TableStyle([
+                    ('BACKGROUND', (0, 0), (-1, 0), colors.darkgreen),
+                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                    ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                    ('FONTSIZE', (0, 0), (-1, 0), 10),
+                    ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                    ('BACKGROUND', (0, 1), (-1, -1), colors.lightgrey),
+                    ('GRID', (0, 0), (-1, -1), 1, colors.black)
+                ]))
+
+                story.append(Paragraph("ECG Lead Configuration:", styles['Normal']))
+                story.append(config_table)
+                story.append(Spacer(1, 8))
+
+                # Get common data length and sampling rate for display
+                first_lead_info = next(iter(leads.values()))
+                common_data_length = first_lead_info.get('length', 0)
+                common_sampling_rate = first_lead_info.get('sampling_rate', 500)
+
+                # Add data specifications before the table
+                story.append(Paragraph(f"ECG Data Specifications: {common_data_length:,} samples per lead at {common_sampling_rate} Hz sampling rate", styles['Normal']))
+                story.append(Spacer(1, 6))
+
+                # ECG Lead Quality Analysis (simplified without repetitive data length/sampling rate)
+                lead_data = [['ECG Lead', 'AI Configuration', 'Quality Score', 'Anomalous Chunks']]
+                for lead_name, lead_info in leads.items():
+                    quality_score = lead_info.get('quality_score', 0)
+                    is_configured = lead_name in configured_leads if configured_leads else False
+                    config_status = "✓ AI Configured" if is_configured else "⭕ Not Configured"
+                    anomaly_percentage = 15  # Placeholder
+
+                    lead_data.append([
+                        lead_name,
+                        config_status,
+                        f"{quality_score:.1f}/100",
+                        f"{anomaly_percentage}%"
+                    ])
+
+                lead_table = Table(lead_data, colWidths=[1.5*inch, 1.5*inch, 1.5*inch, 1.5*inch])
+                lead_table.setStyle(TableStyle([
+                    ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                    ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                    ('FONTSIZE', (0, 0), (-1, 0), 9),
+                    ('FONTSIZE', (0, 1), (-1, -1), 8),
+                    ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                    ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                    ('GRID', (0, 0), (-1, -1), 1, colors.black)
+                ]))
+
+                story.append(Paragraph("ECG Lead Quality & Anomaly Analysis:", styles['Normal']))
+                story.append(lead_table)
+                story.append(Spacer(1, 12))
+
+                # ECG Waveform plots banner
+                waveform_banner_style = ParagraphStyle(
+                    'WaveformBanner',
+                    parent=styles['Normal'],
+                    fontSize=10,
+                    textColor=colors.darkblue,
+                    backColor=colors.lightgrey,
+                    borderColor=colors.grey,
+                    borderWidth=1,
+                    borderPadding=6,
+                    alignment=1  # Center alignment
+                )
+                story.append(Paragraph("📈 ECG Waveform plots would be displayed here (7-lead ECG with anomaly chunk highlighting)", waveform_banner_style))
+                story.append(Spacer(1, 12))
+
+                # ECG Chunk Analysis Table - Only Anomalous Chunks
+                try:
+                    # Get chunk-level data for this specific event from database - only anomalous chunks
+                    conn = sqlite3.connect(self.db_path)
+                    query = """
+                        SELECT lead_name, event_id, chunk_id, anomaly_status, anomaly_type, error_score
+                        FROM chunks
+                        WHERE event_id = ? AND source_file LIKE ? AND anomaly_status = 'anomaly'
+                        ORDER BY lead_name, chunk_id
+                    """
+                    chunk_data = pd.read_sql_query(query, conn, params=[event_id, f"%{patient_id}%"])
+                    conn.close()
+
+                    if not chunk_data.empty:
+                        # Constants for offset calculation - corrected for 12-second ECG strips
+                        sampling_rate = 200        # Hz - actual ECG sampling rate
+                        total_strip_duration = 12  # seconds
+                        total_samples = sampling_rate * total_strip_duration  # 2400 samples
+
+                        chunk_data_table = [['ECG Lead', 'Chunk ID', 'Offset of Anomaly in Strip', 'Anomaly Type', 'Error Score']]
+
+                        for _, chunk_row in chunk_data.iterrows():
+                            try:
+                                # Try multiple conversion approaches
+                                chunk_id_raw = chunk_row['chunk_id']
+
+                                # Handle different data types
+                                if pd.isna(chunk_id_raw):
+                                    chunk_id = 0
+                                elif isinstance(chunk_id_raw, (int, float)):
+                                    chunk_id = int(chunk_id_raw)
+                                elif isinstance(chunk_id_raw, str):
+                                    cleaned = chunk_id_raw.strip()
+                                    if cleaned.isdigit():
+                                        chunk_id = int(cleaned)
+                                    elif cleaned.startswith('chunk_'):
+                                        # Handle chunk_eventid_chunknum format
+                                        parts = cleaned.split('_')
+                                        if len(parts) >= 3:  # chunk_eventid_chunknum
+                                            chunk_num_str = parts[-1]  # Get last part (chunk number)
+                                            if chunk_num_str.isdigit():
+                                                chunk_id = int(chunk_num_str)
+                                            else:
+                                                raise ValueError(f"Last part '{chunk_num_str}' is not a digit")
+                                        else:
+                                            raise ValueError(f"Unexpected chunk format: '{cleaned}'")
+                                    else:
+                                        # Try to extract all digits and use the last one
+                                        import re
+                                        digits = re.findall(r'\d+', cleaned)
+                                        if digits:
+                                            chunk_id = int(digits[-1])  # Use last number instead of first
+                                        else:
+                                            raise ValueError(f"No digits found in '{cleaned}'")
+                                else:
+                                    raise ValueError(f"Unexpected type: {type(chunk_id_raw)}")
+
+                                # Calculate offset - assume chunk_id is the sample number within the strip
+                                offset_seconds = chunk_id / sampling_rate
+
+                                # Clamp to 12-second strip duration for sanity check
+                                if offset_seconds > total_strip_duration:
+                                    offset_seconds = offset_seconds % total_strip_duration
+
+                                # Format offset time
+                                if offset_seconds < 60:
+                                    offset_time = f"{offset_seconds:.1f}s"
+                                else:
+                                    minutes = int(offset_seconds // 60)
+                                    seconds = offset_seconds % 60
+                                    offset_time = f"{minutes}m {seconds:.1f}s"
+
+                            except (ValueError, TypeError) as e:
+                                # Enhanced fallback - try to extract chunk number
+                                try:
+                                    import re
+                                    chunk_str = str(chunk_row['chunk_id'])
+                                    if chunk_str.startswith('chunk_'):
+                                        # Split by underscore and get the last part
+                                        parts = chunk_str.split('_')
+                                        if len(parts) >= 3:
+                                            chunk_id = int(parts[-1])  # Get last part (chunk number)
+                                        else:
+                                            chunk_id = 0
+                                    else:
+                                        # Extract last number
+                                        numbers = re.findall(r'\d+', chunk_str)
+                                        chunk_id = int(numbers[-1]) if numbers else 0
+
+                                    offset_seconds = chunk_id / sampling_rate
+                                    # Clamp to 12-second strip
+                                    if offset_seconds > total_strip_duration:
+                                        offset_seconds = offset_seconds % total_strip_duration
+                                    if offset_seconds < 60:
+                                        offset_time = f"{offset_seconds:.1f}s"
+                                    else:
+                                        minutes = int(offset_seconds // 60)
+                                        seconds = offset_seconds % 60
+                                        offset_time = f"{minutes}m {seconds:.1f}s"
+                                except:
+                                    offset_time = f"Chunk {chunk_row['chunk_id']}"
+
+                            # Format anomaly type
+                            anomaly_type = chunk_row['anomaly_type'] if chunk_row['anomaly_type'] and chunk_row['anomaly_type'] != 'None' else 'Unknown Anomaly'
+
+                            # Format error score safely
+                            try:
+                                error_score = f"{float(chunk_row['error_score']):.4f}"
+                            except (ValueError, TypeError):
+                                error_score = str(chunk_row['error_score'])
+
+                            chunk_data_table.append([
+                                chunk_row['lead_name'],
+                                str(chunk_row['chunk_id']),
+                                offset_time,
+                                anomaly_type,
+                                error_score
+                            ])
+
+                        chunk_table = Table(chunk_data_table, colWidths=[1*inch, 0.8*inch, 1.4*inch, 1.5*inch, 1*inch])
+                        chunk_table.setStyle(TableStyle([
+                            ('BACKGROUND', (0, 0), (-1, 0), colors.darkred),
+                            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                            ('FONTSIZE', (0, 0), (-1, 0), 8),
+                            ('FONTSIZE', (0, 1), (-1, -1), 7),
+                            ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+                            ('BACKGROUND', (0, 1), (-1, -1), colors.lightcoral),
+                            ('GRID', (0, 0), (-1, -1), 1, colors.black),
+                            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE')
+                        ]))
+
+                        story.append(Paragraph("ECG Chunk Analysis (Anomalous Chunks Only):", styles['Normal']))
+                        story.append(chunk_table)
+                        story.append(Paragraph(f"Note: Showing {len(chunk_data_table)-1} anomalous chunks. Sampling rate: {sampling_rate} Hz, Strip duration: {total_strip_duration}s",
+                                             ParagraphStyle('Note', parent=styles['Normal'], fontSize=8, textColor=colors.grey)))
+                        story.append(Spacer(1, 12))
+                    else:
+                        story.append(Paragraph("No anomalous chunks detected for this event.", styles['Normal']))
+                        story.append(Spacer(1, 8))
+                except Exception as e:
+                    story.append(Paragraph(f"Note: Could not load chunk analysis data: {e}", styles['Normal']))
+                    story.append(Spacer(1, 8))
+
+            # Vital Signs Table (ordered as requested)
+            vitals = report_data.get('vitals', {})
+            if vitals:
+                # Get event timestamp for relative time calculation
+                event_timestamp = None
+                if 'event_timestamp' in event_info:
+                    event_timestamp = pd.to_datetime(event_info['event_timestamp'], unit='s')
+                elif 'timestamp' in event_info:
+                    event_timestamp = pd.to_datetime(event_info['timestamp'], unit='s')
+
+                vital_order = ['HR', 'RespRate', 'SpO2', 'Pulse', 'Temp', 'Systolic', 'Diastolic', 'XL_Posture']
+                vitals_data = [['Vital Sign', 'Value', 'Normal Range', 'Status', 'Relative Time', 'Timestamp']]
+
+                for vital_name in vital_order:
+                    if vital_name in vitals:
+                        vital_info = vitals[vital_name]
+                        display_name = vital_name.replace('_', ' ').title()
+                        if vital_name == 'RespRate':
+                            display_name = 'RR (Respiratory Rate)'
+                        elif vital_name == 'HR':
+                            display_name = 'HR (Heart Rate)'
+                        elif vital_name == 'SpO2':
+                            display_name = 'SpO2 (Oxygen Saturation)'
+                        elif vital_name == 'XL_Posture':
+                            display_name = 'XL Posture'
+
+                        value = vital_info.get('value', 'N/A')
+                        units = vital_info.get('units', '')
+                        lower_threshold = vital_info.get('lower_threshold', 'N/A')
+                        upper_threshold = vital_info.get('upper_threshold', 'N/A')
+                        timestamp = vital_info.get('timestamp', 'N/A')
+
+                        # Convert timestamp and calculate relative time
+                        formatted_timestamp = 'N/A'
+                        relative_time = 'N/A'
+
+                        if isinstance(timestamp, (int, float)):
+                            try:
+                                vital_timestamp = pd.to_datetime(timestamp, unit='s')
+                                formatted_timestamp = vital_timestamp.strftime('%Y-%m-%d %H:%M:%S')
+
+                                # Calculate relative time difference w.r.t event time
+                                if event_timestamp is not None:
+                                    time_diff = vital_timestamp - event_timestamp
+                                    total_seconds = int(time_diff.total_seconds())
+
+                                    if total_seconds == 0:
+                                        relative_time = "At Event"
+                                    elif total_seconds > 0:
+                                        # After event
+                                        if total_seconds < 60:
+                                            relative_time = f"+{total_seconds}s"
+                                        elif total_seconds < 3600:
+                                            minutes = total_seconds // 60
+                                            seconds = total_seconds % 60
+                                            relative_time = f"+{minutes}m {seconds}s" if seconds > 0 else f"+{minutes}m"
+                                        else:
+                                            hours = total_seconds // 3600
+                                            minutes = (total_seconds % 3600) // 60
+                                            relative_time = f"+{hours}h {minutes}m" if minutes > 0 else f"+{hours}h"
+                                    else:
+                                        # Before event
+                                        abs_seconds = abs(total_seconds)
+                                        if abs_seconds < 60:
+                                            relative_time = f"-{abs_seconds}s"
+                                        elif abs_seconds < 3600:
+                                            minutes = abs_seconds // 60
+                                            seconds = abs_seconds % 60
+                                            relative_time = f"-{minutes}m {seconds}s" if seconds > 0 else f"-{minutes}m"
+                                        else:
+                                            hours = abs_seconds // 3600
+                                            minutes = (abs_seconds % 3600) // 60
+                                            relative_time = f"-{hours}h {minutes}m" if minutes > 0 else f"-{hours}h"
+                            except:
+                                formatted_timestamp = str(timestamp)
+
+                        # Determine status
+                        status = "Normal"
+                        if (isinstance(value, (int, float)) and
+                            isinstance(lower_threshold, (int, float)) and
+                            isinstance(upper_threshold, (int, float))):
+                            if value < lower_threshold:
+                                status = "Low"
+                            elif value > upper_threshold:
+                                status = "High"
+                            else:
+                                status = "Normal"
+
+                        vitals_data.append([
+                            display_name,
+                            f"{value} {units}".strip(),
+                            f"{lower_threshold}-{upper_threshold} {units}".strip() if lower_threshold != 'N/A' else 'N/A',
+                            status,
+                            relative_time,
+                            formatted_timestamp
+                        ])
+
+                vitals_table = Table(vitals_data, colWidths=[1.2*inch, 0.8*inch, 1*inch, 0.6*inch, 0.8*inch, 1.2*inch])
+                vitals_table.setStyle(TableStyle([
+                    ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                    ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                    ('FONTSIZE', (0, 0), (-1, 0), 9),
+                    ('FONTSIZE', (0, 1), (-1, -1), 8),
+                    ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                    ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                    ('GRID', (0, 0), (-1, -1), 1, colors.black)
+                ]))
+
+                story.append(Paragraph("Vital Signs Analysis:", styles['Normal']))
+                story.append(vitals_table)
+                story.append(Spacer(1, 12))
+
+                # PPG and Respiratory waveform plots banner
+                story.append(Paragraph("📊 PPG and Respiratory waveform plots would be displayed here (requires plotting implementation)", waveform_banner_style))
+                story.append(Spacer(1, 12))
+
+            # Analysis Information
+            story.append(Paragraph("Analysis Information", subheading_style))
+
+            analysis_data = [
+                ['Analysis Parameter', 'Result'],
+                ['AI Verdict', ai_data.get('ai_verdict', 'Unknown')],
+                ['Ground Truth Condition', ai_data.get('event_condition', 'Unknown')],
+                ['Average Error Score', f"{ai_data.get('error_score', 0):.4f}" if isinstance(ai_data.get('error_score'), (int, float)) else str(ai_data.get('error_score', 'N/A'))],
+                ['Analysis Timestamp', str(ai_data.get('timestamp', 'Unknown'))],
+                ['Model Version', str(device_info.get('model_version', device_info.get('software_version', device_info.get('ai_model_version', 'Unknown'))))]
+            ]
+
+            analysis_table = Table(analysis_data, colWidths=[2.5*inch, 3*inch])
+            analysis_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, 0), 12),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black)
+            ]))
+
+            story.append(analysis_table)
+            story.append(Spacer(1, 20))
+
+            # Footer
+            footer_style = ParagraphStyle(
+                'Footer',
+                parent=styles['Normal'],
+                fontSize=8,
+                textColor=colors.grey,
+                alignment=1
+            )
+            story.append(Paragraph("🔒 Confidential Medical Information - RMSAI ECG Analysis System", footer_style))
+
+            # Build PDF
+            doc.build(story)
+
+            # Get PDF data
+            buffer.seek(0)
+            pdf_data = buffer.getvalue()
+            buffer.close()
+
+            return pdf_data
+
+        except ImportError:
+            st.warning("PDF export requires reportlab library. Install with: pip install reportlab")
+            return None
+        except Exception as e:
+            st.error(f"Error generating PDF: {e}")
+            return None
+
     def render_patient_analysis(self, chunks_df: pd.DataFrame):
         """Render combined Patient Analysis view with both events and patient-specific data"""
         st.header("👥 Patient Analysis")
@@ -1246,6 +2774,46 @@ class RMSAIDashboard:
 
         # Filter data for selected patient
         patient_data = chunks_df[chunks_df['patient_id'] == selected_patient]
+
+        # Initialize session state for event reports
+        if 'selected_event_for_report' not in st.session_state:
+            st.session_state.selected_event_for_report = None
+
+        # Check if we should show an event report instead of the main analysis
+        if st.session_state.selected_event_for_report:
+            event_id = st.session_state.selected_event_for_report
+
+            # Find the source file for this event
+            event_data = patient_data[patient_data['event_id'] == event_id]
+            if not event_data.empty:
+                source_file = event_data.iloc[0]['source_file']
+
+                # Prepare AI data for the report
+                ai_data = {
+                    'event_condition': 'Unknown',  # Will be filled from HDF5
+                    'ai_verdict': 'Unknown',
+                    'error_score': event_data['error_score'].mean(),
+                    'timestamp': event_data['processing_timestamp'].iloc[0]
+                }
+
+                # Get ground truth for this specific event
+                ground_truth_conditions = self._get_ground_truth_conditions(event_data)
+                ai_data['event_condition'] = ground_truth_conditions.get(event_id, 'Unknown')
+
+                # Get AI verdict for this event
+                event_anomaly_types = event_data['anomaly_type'].dropna().tolist()
+                if event_anomaly_types and any(t for t in event_anomaly_types if t and t != 'None'):
+                    ai_data['ai_verdict'] = event_anomaly_types[0]  # Simplified - take first anomaly type
+                else:
+                    ai_data['ai_verdict'] = 'Normal'
+
+                # Render the report
+                self._render_event_report(selected_patient, event_id, source_file, ai_data)
+                return
+            else:
+                st.error(f"No data found for event {event_id}")
+                st.session_state.selected_event_for_report = None
+                st.rerun()
 
         # Get ground truth conditions
         ground_truth_conditions = self._get_ground_truth_conditions(patient_data)
@@ -1429,7 +2997,39 @@ class RMSAIDashboard:
             start_idx = (page - 1) * rows_per_page
             end_idx = start_idx + rows_per_page
 
-            st.dataframe(filtered_events.iloc[start_idx:end_idx], use_container_width=True, hide_index=True)
+            # Display events with View Report buttons
+            current_page_events = filtered_events.iloc[start_idx:end_idx]
+
+            # Header row
+            header_cols = st.columns([2, 1.5, 2, 2, 1.5, 2, 1.5, 1])
+            header_cols[0].markdown("**Event ID**")
+            header_cols[1].markdown("**Lead**")
+            header_cols[2].markdown("**Event Condition**")
+            header_cols[3].markdown("**AI Verdict**")
+            header_cols[4].markdown("**Error Score**")
+            header_cols[5].markdown("**Timestamp**")
+            header_cols[6].markdown("**Comparison**")
+            header_cols[7].markdown("**Action**")
+            st.divider()
+
+            for idx, (_, row) in enumerate(current_page_events.iterrows()):
+                with st.container():
+                    cols = st.columns([2, 1.5, 2, 2, 1.5, 2, 1.5, 1])
+
+                    cols[0].write(row['Event ID'])
+                    cols[1].write(row['Lead'])
+                    cols[2].write(row['Event Condition (Ground Truth)'])
+                    cols[3].write(row['AI Verdict'])
+                    cols[4].write(f"{row['Avg Error Score']:.4f}")
+                    cols[5].write(row['Timestamp'])
+                    cols[6].write(row['Comparison'])
+
+                    # View Report button
+                    if cols[7].button("📋 View Report", key=f"view_report_{row['Event ID']}_{idx}_{page}"):
+                        st.session_state.selected_event_for_report = row['Event ID']
+                        st.rerun()
+
+                    st.divider()
 
             st.info(f"Showing {min(rows_per_page, len(filtered_events) - start_idx)} of {len(filtered_events)} events (Page {page} of {total_pages})")
         else:

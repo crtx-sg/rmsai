@@ -220,11 +220,38 @@ The RMSAI Enhanced ECG Anomaly Detection System follows a modular, real-time pro
   - **Conditions**: Condition-specific analysis and statistics
   - **Leads**: ECG lead analysis and comparison
   - **Similarity**: Pattern matching and similar case finding
+  - **👥 Patient Analysis**: Comprehensive patient-specific analysis and reporting
 - **Features**:
   - Auto-refresh capabilities (10s-60s intervals)
   - Data caching for performance
-  - Export functionality (CSV)
+  - Export functionality (CSV, PDF)
   - Real-time API integration
+  - Medical report generation with HDF5 integration
+
+#### 🏥 **Patient Analysis System**
+**Enhanced Features**:
+- **Patient-Specific Analysis**:
+  - Event-by-event breakdown with AI vs Ground Truth comparison
+  - Accuracy metrics and performance evaluation
+  - Comprehensive patient summary statistics
+- **Detailed Event Reports**:
+  - **Information Section**: Device info, patient data, event metadata, data quality scores
+  - **Diagnosis Section**: ECG lead configuration, vital signs analysis, waveform summaries
+  - **Analysis Section**: AI results, processing information, model versioning
+- **ECG Chunk Analysis**:
+  - Anomalous chunk detection with temporal mapping
+  - Offset calculation within 12-second ECG strips (200Hz sampling)
+  - Lead-specific anomaly distribution analysis
+- **Medical Report Generation**:
+  - Professional PDF export with clinical formatting
+  - HDF5 data extraction for ground truth conditions
+  - Vital signs with relative time differences from event
+  - ECG lead quality assessment and AI configuration status
+- **Advanced Data Integration**:
+  - Ground truth extraction from HDF5 event attributes
+  - API integration for ECG lead configuration
+  - Device information and data quality scoring
+  - Model version tracking and metadata persistence
 
 ### Deployment Architecture
 
@@ -1311,6 +1338,11 @@ python api_server.py
 streamlit run dashboard.py
 
 # Access dashboard: http://localhost:8501
+# Navigate to "👥 Patient Analysis" tab for:
+# - Patient-specific event analysis
+# - Detailed medical reports
+# - PDF export functionality
+# - ECG chunk analysis
 ```
 
 #### Run Analytics
