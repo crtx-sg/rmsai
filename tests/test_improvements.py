@@ -327,9 +327,9 @@ class ImprovementTester:
 
             # Test Patient Analysis features
             try:
-                # Test ground truth extraction method
+                # Test event condition extraction method
                 if hasattr(dashboard, '_get_ground_truth_conditions'):
-                    logger.info("✓ Ground truth extraction method available")
+                    logger.info("✓ Event condition extraction method available")
 
                 # Test event report data extraction method
                 if hasattr(dashboard, '_extract_event_report_data'):
@@ -457,14 +457,14 @@ class ImprovementTester:
             except Exception as e:
                 logger.warning(f"⚠ PDF generation test failed: {e}")
 
-            # Test ground truth extraction structure
+            # Test event condition extraction structure
             try:
                 if hasattr(dashboard, '_get_ground_truth_conditions'):
-                    logger.info("✓ Ground truth extraction method available")
+                    logger.info("✓ Event condition extraction method available")
                 else:
-                    logger.warning("⚠ Ground truth extraction method not found")
+                    logger.warning("⚠ Event condition extraction method not found")
             except Exception as e:
-                logger.warning(f"⚠ Ground truth extraction test failed: {e}")
+                logger.warning(f"⚠ Event condition extraction test failed: {e}")
 
             logger.info("✅ Patient Analysis functionality tests completed")
             return True

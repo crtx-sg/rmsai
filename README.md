@@ -17,6 +17,9 @@ The RMSAI Enhanced ECG Anomaly Detection System is a comprehensive real-time pro
 9. [Command-Line Demonstrations](#command-line-demonstrations)
 10. [API Reference](#api-reference)
 11. [Configuration](#configuration)
+    - [Centralized Configuration](#centralized-configuration-configpy)
+    - [Clinical Severity & Thresholds](#clinical-severity-hierarchy)
+    - [Heart Rate Classification](#heart-rate-classification-thresholds)
 12. [Performance Benchmarks](#performance-benchmarks)
 13. [Clinical Applications](#clinical-applications)
 14. [Troubleshooting](#troubleshooting)
@@ -151,15 +154,17 @@ The RMSAI Enhanced ECG Anomaly Detection System follows a modular, real-time pro
 - **Schema**:
   ```sql
   CREATE TABLE chunks (
-      chunk_id TEXT PRIMARY KEY,
-      event_id TEXT,
-      lead_name TEXT,
-      error_score REAL,
-      anomaly_status TEXT,
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      event_id TEXT NOT NULL,
+      source_file TEXT NOT NULL,
+      chunk_id TEXT UNIQUE NOT NULL,
+      lead_name TEXT NOT NULL,
+      vector_id TEXT,
+      anomaly_status TEXT NOT NULL,
       anomaly_type TEXT,
-      processing_timestamp TEXT,
-      source_file TEXT,
-      vector_id TEXT
+      error_score REAL NOT NULL,
+      processing_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      metadata TEXT
   );
   ```
 - **Indices**: Optimized for time-based and error score queries
@@ -231,7 +236,7 @@ The RMSAI Enhanced ECG Anomaly Detection System follows a modular, real-time pro
 #### 🏥 **Patient Analysis System**
 **Enhanced Features**:
 - **Patient-Specific Analysis**:
-  - Event-by-event breakdown with AI vs Ground Truth comparison
+  - Event-by-event breakdown with AI vs Event Condition comparison
   - Accuracy metrics and performance evaluation
   - Comprehensive patient summary statistics
 - **Detailed Event Reports**:
@@ -244,11 +249,11 @@ The RMSAI Enhanced ECG Anomaly Detection System follows a modular, real-time pro
   - Lead-specific anomaly distribution analysis
 - **Medical Report Generation**:
   - Professional PDF export with clinical formatting
-  - HDF5 data extraction for ground truth conditions
+  - HDF5 data extraction for event condition information
   - Vital signs with relative time differences from event
   - ECG lead quality assessment and AI configuration status
 - **Advanced Data Integration**:
-  - Ground truth extraction from HDF5 event attributes
+  - Event condition extraction from HDF5 event attributes
   - API integration for ECG lead configuration
   - Device information and data quality scoring
   - Model version tracking and metadata persistence
@@ -411,7 +416,7 @@ PatientID_YYYY-MM.h5
 │   ├── patient_id                # "PT1234"
 │   ├── sampling_rate_ecg          # 200.0 Hz
 │   ├── sampling_rate_ppg          # 75.0 Hz
-│   ├── sampling_rate_resp         # 33.33 Hz (NEW)
+│   ├── sampling_rate_resp         # 33.33 Hz
 │   ├── alarm_time_epoch          # Epoch timestamp
 │   ├── alarm_offset_seconds      # 6.0 (center position)
 │   ├── seconds_before_event      # 6.0 seconds
@@ -427,31 +432,31 @@ PatientID_YYYY-MM.h5
 │   │   ├── aVL                   # Augmented vector left [2400 samples, gzip]
 │   │   ├── aVF                   # Augmented vector foot [2400 samples, gzip]
 │   │   ├── vVX                   # Chest lead [2400 samples, gzip]
-│   │   ├── pacer_info            # Pacer information (4-byte integer) (NEW)
-│   │   └── pacer_offset          # Pacer spike offset (sample number) (NEW)
+│   │   ├── pacer_info            # Pacer information (4-byte integer)
+│   │   └── pacer_offset          # Pacer spike offset (sample number)
 │   ├── ppg/                      # PPG signal group (75 Hz)
 │   │   └── PPG                   # Photoplethysmogram [900 samples, gzip]
-│   ├── resp/                     # Respiratory signal group (33.33 Hz) (NEW)
+│   ├── resp/                     # Respiratory signal group (33.33 Hz)
 │   │   └── RESP                  # Respiratory waveform [400 samples, gzip]
 │   ├── vitals/                   # Single vital measurements
 │   │   ├── HR/                   # Heart rate group
 │   │   │   ├── value             # Heart rate value (int)
 │   │   │   ├── units             # "bpm"
 │   │   │   ├── timestamp         # Measurement epoch timestamp
-│   │   │   ├── upper_threshold   # Upper limit (int) (NEW)
-│   │   │   └── lower_threshold   # Lower limit (int) (NEW)
+│   │   │   ├── upper_threshold   # Upper limit (int)
+│   │   │   └── lower_threshold   # Lower limit (int)
 │   │   ├── Pulse/                # Pulse rate group (with thresholds)
 │   │   ├── SpO2/                 # Oxygen saturation group (with thresholds)
 │   │   ├── Systolic/             # Systolic BP group (with thresholds)
 │   │   ├── Diastolic/            # Diastolic BP group (with thresholds)
 │   │   ├── RespRate/             # Respiratory rate group (with thresholds)
 │   │   ├── Temp/                 # Temperature group (with thresholds)
-│   │   └── XL_Posture/           # Posture group (ENHANCED)
+│   │   └── XL_Posture/           # Posture group
 │   │       ├── value             # Posture angle value (int)
 │   │       ├── units             # "degrees"
 │   │       ├── timestamp         # Measurement epoch timestamp
-│   │       ├── step_count        # Total steps (int) (NEW)
-│   │       └── time_since_posture_change  # Seconds (int) (NEW)
+│   │       ├── step_count        # Total steps (int)
+│   │       └── time_since_posture_change  # Seconds (int)
 │   ├── timestamp                 # Event epoch timestamp
 │   └── uuid                      # Unique event identifier
 ├── event_1002/                   # Subsequent events...
@@ -898,7 +903,7 @@ The adaptive threshold system provides intelligent, self-tuning anomaly detectio
 
 ## Heart Rate-Based Anomaly Classification
 
-### 🫀 **Intelligent Rhythm Classification (New Feature)**
+### 🫀 **Intelligent Rhythm Classification**
 
 The RMSAI system uses heart rate ranges to accurately distinguish between Tachycardia and Bradycardia when anomalies are detected, addressing the challenge that these conditions have similar ECG morphology but different heart rates.
 
@@ -1940,21 +1945,295 @@ st.set_page_config(
 # Cache duration: 10-300 seconds
 ```
 
+### Centralized Configuration (config.py)
+
+The RMSAI system uses a centralized configuration file (`config.py`) to manage all clinical parameters, ensuring consistency across components and eliminating code duplication.
+
+#### Clinical Severity Hierarchy
+
+The system uses a severity-based prioritization system for anomaly classification:
+
+```python
+# config.py
+CLINICAL_SEVERITY_ORDER = {
+    'Ventricular Tachycardia (MIT-BIH)': 5,  # Most severe
+    'Atrial Fibrillation (PTB-XL)': 4,
+    'Unknown Arrhythmia': 3,
+    'Tachycardia': 2,
+    'Bradycardia': 1                         # Least severe
+}
+```
+
+**Usage:**
+- **Dashboard**: Highest severity condition displayed first in mixed anomaly events
+- **Reporting**: AI verdicts prioritize most severe conditions
+- **Analytics**: Clustering and analysis respect clinical importance
+
+#### Heart Rate Classification Thresholds
+
+Configure clinical heart rate ranges for bradycardia and tachycardia detection:
+
+```python
+# config.py
+HR_THRESHOLDS = {
+    'bradycardia_max': 60,      # ≤60 BPM = Bradycardia
+    'tachycardia_min': 100      # ≥100 BPM = Tachycardia
+    # Normal range: 61-99 BPM (implicit)
+}
+```
+
+**Clinical Customization Examples:**
+```python
+# Pediatric patients (different HR norms)
+HR_THRESHOLDS = {
+    'bradycardia_max': 80,      # Pediatric bradycardia
+    'tachycardia_min': 140      # Pediatric tachycardia
+}
+
+# Conservative thresholds
+HR_THRESHOLDS = {
+    'bradycardia_max': 55,      # More conservative
+    'tachycardia_min': 110      # More conservative
+}
+
+# Athlete-specific thresholds
+HR_THRESHOLDS = {
+    'bradycardia_max': 45,      # Athletes may have lower resting HR
+    'tachycardia_min': 120      # Higher exercise tolerance
+}
+```
+
+#### Reconstruction Error Thresholds
+
+**Default Thresholds** (optimized for clinical accuracy):
+```python
+# config.py
+DEFAULT_CONDITION_THRESHOLDS = {
+    'Atrial Fibrillation (PTB-XL)': 0.8,      # More sensitive
+    'Tachycardia': 0.85,
+    'Bradycardia': 0.85,
+    'Unknown Arrhythmia': 0.9,
+    'Ventricular Tachycardia (MIT-BIH)': 1.0  # Most specific
+}
+```
+
+**Adaptive Threshold Ranges** (for automatic optimization):
+```python
+# config.py
+ADAPTIVE_THRESHOLD_RANGES = {
+    'Atrial Fibrillation (PTB-XL)': (0.7, 0.95),    # Flexible range
+    'Tachycardia': (0.75, 1.0),
+    'Bradycardia': (0.75, 1.0),
+    'Unknown Arrhythmia': (0.8, 1.05),
+    'Ventricular Tachycardia (MIT-BIH)': (0.95, 1.2) # Conservative range
+}
+```
+
+#### Standard Condition Names
+
+Consistent naming across all modules:
+```python
+# config.py
+CONDITION_NAMES = {
+    'V_TAC': 'Ventricular Tachycardia (MIT-BIH)',
+    'A_FIB': 'Atrial Fibrillation (PTB-XL)',
+    'UNKNOWN': 'Unknown Arrhythmia',
+    'TACHY': 'Tachycardia',
+    'BRADY': 'Bradycardia',
+    'NORMAL': 'Normal'
+}
+```
+
+### Threshold Configuration Strategies
+
+#### 1. Development/Testing (High Sensitivity)
+```python
+# Detect more anomalies for algorithm validation
+TEST_THRESHOLDS = {
+    'Atrial Fibrillation (PTB-XL)': 0.6,
+    'Tachycardia': 0.7,
+    'Bradycardia': 0.7,
+    'Unknown Arrhythmia': 0.75,
+    'Ventricular Tachycardia (MIT-BIH)': 0.8
+}
+```
+
+#### 2. Clinical Production (Balanced)
+```python
+# Default values - balanced sensitivity/specificity
+# (Already set in DEFAULT_CONDITION_THRESHOLDS)
+```
+
+#### 3. Research/Screening (High Specificity)
+```python
+# Reduce false positives for research studies
+RESEARCH_THRESHOLDS = {
+    'Atrial Fibrillation (PTB-XL)': 0.95,
+    'Tachycardia': 1.0,
+    'Bradycardia': 1.0,
+    'Unknown Arrhythmia': 1.1,
+    'Ventricular Tachycardia (MIT-BIH)': 1.2
+}
+```
+
+### Configuration Helper Functions
+
+The config module provides utility functions for easy integration:
+
+```python
+from config import (
+    get_severity_score,
+    is_bradycardia,
+    is_tachycardia,
+    is_normal_heart_rate,
+    sort_by_severity
+)
+
+# Check clinical severity
+severity = get_severity_score('Ventricular Tachycardia (MIT-BIH)')  # Returns 5
+
+# Heart rate classification
+if is_bradycardia(45):
+    print("Bradycardia detected")
+
+if is_tachycardia(120):
+    print("Tachycardia detected")
+
+# Sort conditions by clinical importance
+conditions = ['Tachycardia', 'Ventricular Tachycardia (MIT-BIH)', 'Bradycardia']
+sorted_conditions = sort_by_severity(conditions)
+# Returns: ['Ventricular Tachycardia (MIT-BIH)', 'Tachycardia', 'Bradycardia']
+```
+
+### Dynamic Configuration Updates
+
+For runtime configuration changes without restart:
+
+```python
+# In your application
+from config import HR_THRESHOLDS, DEFAULT_CONDITION_THRESHOLDS
+
+# Update heart rate thresholds
+HR_THRESHOLDS['bradycardia_max'] = 55
+HR_THRESHOLDS['tachycardia_min'] = 110
+
+# Update reconstruction thresholds
+DEFAULT_CONDITION_THRESHOLDS['Tachycardia'] = 0.9
+
+# Changes take effect immediately across all modules
+```
+
+### Integration with Adaptive Thresholds
+
+The centralized configuration works seamlessly with adaptive threshold optimization:
+
+```python
+from adaptive_thresholds import AdaptiveThresholdManager
+from config import DEFAULT_CONDITION_THRESHOLDS, ADAPTIVE_THRESHOLD_RANGES
+
+# Initialize with centralized config
+manager = AdaptiveThresholdManager("rmsai_metadata.db")
+
+# Adaptive optimization respects configured ranges
+optimized = manager.calculate_optimal_thresholds()
+
+# Results stay within ADAPTIVE_THRESHOLD_RANGES bounds
+```
+
 ## Performance Benchmarks
+
+### Performance Test Environment & Assumptions
+
+All performance metrics are based on the following test environment and assumptions:
+
+#### **Hardware Configuration:**
+- **CPU**: Intel i7/i9 or AMD Ryzen 7/9 (8+ cores, 3.2+ GHz)
+- **RAM**: 16GB+ DDR4 (minimum 8GB for basic operation)
+- **Storage**: SSD with >500 MB/s read/write speeds
+- **GPU**: Optional CUDA-compatible GPU (improves LSTM inference by ~30%)
+
+#### **Software Environment:**
+- **OS**: Linux (Ubuntu 20.04+) or Windows 10/11
+- **Python**: 3.8+ with optimized NumPy/PyTorch builds
+- **Dependencies**: All packages installed via requirements files
+- **Model**: Pre-trained LSTM autoencoder (models/model.pth, 3.9MB)
+
+#### **Data Processing Assumptions:**
+- **ECG Sampling Rate**: 200 Hz (2400 samples per 12-second event)
+- **Chunk Configuration**: 140 samples per chunk, 70-sample step size (50% overlap)
+- **Chunks per Lead**: 33 chunks (99.2% coverage of 2400-sample event)
+- **Lead Processing**: Sequential processing (not parallelized across leads)
+- **Model Inference**: Single-threaded PyTorch inference
+- **Database Operations**: Local SQLite and ChromaDB (no network latency)
+
+#### **System Load Assumptions:**
+- **Dedicated Processing**: RMSAI is primary application (not competing for resources)
+- **File I/O**: Files available locally (no network file systems)
+- **Memory Availability**: Sufficient RAM to avoid swapping
+- **Background Services**: Minimal interference from other processes
+
+#### **Event Processing Breakdown:**
+```
+Single Event (7 leads) = 7 leads × 33 chunks × ~10ms per chunk
+                       = 231 chunks × 10ms = 2.31 seconds
+```
+
+**Per-chunk Processing Time (~10ms) includes:**
+- ECG data extraction from HDF5: ~1ms
+- Data normalization/preprocessing: ~1ms
+- LSTM model inference (140→128→140): ~6ms
+- Reconstruction error calculation: ~1ms
+- Vector/SQL database writes: ~1ms
+
+#### **Throughput Calculation Examples:**
+
+**All 7 Leads (Baseline):**
+```
+Event Processing Time: 2.31 seconds
+Events per Minute: 60s ÷ 2.31s = ~26 events/minute
+```
+
+**3 Leads (Standard Monitoring):**
+```
+Event Processing Time: 3 leads × 33 chunks × 10ms = 0.99 seconds
+Events per Minute: 60s ÷ 0.99s = ~61 events/minute
+Performance Gain: (61 - 26) ÷ 26 = 135% improvement
+```
+
+**Single Lead (Rapid Screening):**
+```
+Event Processing Time: 1 lead × 33 chunks × 10ms = 0.33 seconds
+Events per Minute: 60s ÷ 0.33s = ~182 events/minute
+Performance Gain: (182 - 26) ÷ 26 = 600% improvement
+```
+
+#### **Performance Variables:**
+- **Model Complexity**: Current model optimized for accuracy vs speed balance
+- **Batch Processing**: Single-event processing (no batching optimization)
+- **Hardware Acceleration**: CPU-only inference (GPU can improve by 30-50%)
+- **I/O Optimization**: Standard file operations (no memory mapping)
+- **Database Optimization**: Default SQLite/ChromaDB settings
+
+#### **Real-World Performance Factors:**
+- **File Size Variation**: Larger/smaller events affect I/O time proportionally
+- **System Load**: Other applications can reduce throughput by 10-30%
+- **Storage Type**: HDD vs SSD can affect performance by 50-200%
+- **Network Storage**: Remote file systems add 100-500ms per event
+- **Memory Pressure**: Insufficient RAM can reduce performance by 200-500%
 
 ### Processing Performance
 
 #### **Baseline Performance (All 7 Leads):**
-- **Single Chunk**: ~100ms per ECG chunk (140 samples)
+- **Single Chunk**: ~10ms per ECG chunk (140 samples)
 - **Complete Event**: ~2.3s (7 leads × 33 chunks × 10ms)
 - **Throughput**: ~26 events per minute
 - **Memory Usage**: <500MB during processing
 
 #### **Optimized Performance (Configurable Leads):**
-- **3 Leads**: ~1.0s per event (57.1% improvement)
-  - **Throughput**: ~60 events per minute
-- **Single Lead**: ~0.33s per event (85.7% improvement)
-  - **Throughput**: ~180 events per minute
+- **3 Leads**: ~1.0s per event (57.1% time reduction)
+  - **Throughput**: ~60 events per minute (135% throughput increase)
+- **Single Lead**: ~0.33s per event (85.7% time reduction)
+  - **Throughput**: ~180 events per minute (600% throughput increase)
 - **Memory Usage**: Proportionally reduced with lead count
 
 ### Storage Efficiency

@@ -39,6 +39,7 @@ import h5py
 import os
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
+from config import CLINICAL_SEVERITY_ORDER, HR_THRESHOLDS, sort_by_severity, get_severity_score
 
 # Configure Streamlit page
 st.set_page_config(
@@ -83,9 +84,52 @@ class RMSAIDashboard:
         self.db_path = "rmsai_metadata.db"
         self.api_base = "http://localhost:8000/api/v1"
 
+        # Initialize session state
+        self.initialize_session_state()
+
         # Load processor configuration to get selected leads
         self.selected_leads = self._get_selected_leads()
 
+    def get_unified_ai_verdict(self, anomaly_types_list, heart_rate=None, anomaly_status_count=0):
+        """
+        Unified AI verdict calculation with HR-based logic.
+
+        Args:
+            anomaly_types_list: List of anomaly types detected by LSTM
+            heart_rate: Heart rate value (optional, for HR-based detection)
+            anomaly_status_count: Number of chunks marked as anomalous
+
+        Returns:
+            str: AI verdict (e.g., "Normal", "Tachycardia", "Ventricular Tachycardia (MIT-BIH)")
+        """
+        # Use shared configuration
+        bradycardia_max_hr = HR_THRESHOLDS['bradycardia_max']
+        tachycardia_min_hr = HR_THRESHOLDS['tachycardia_min']
+
+        # Start with existing LSTM-detected anomaly types
+        unique_anomalies = list(set([t for t in anomaly_types_list if t and t != 'None' and pd.notna(t)]))
+
+        # HR-based anomaly detection: only apply when LSTM says "normal" (count=0)
+        if anomaly_status_count == 0 and heart_rate is not None:
+            try:
+                hr_value = float(heart_rate)
+                if hr_value <= bradycardia_max_hr:
+                    unique_anomalies.append('Bradycardia')
+                elif hr_value >= tachycardia_min_hr:
+                    unique_anomalies.append('Tachycardia')
+            except (ValueError, TypeError):
+                pass  # Skip if heart rate is not a valid number
+
+        # If no anomalies detected, return Normal
+        if not unique_anomalies:
+            return "Normal"
+
+        # Sort by clinical severity and return
+        unique_anomalies = list(set(unique_anomalies))  # Remove duplicates
+        return ", ".join(sort_by_severity(unique_anomalies))
+
+    def initialize_session_state(self):
+        """Initialize session state variables"""
         # Cache for expensive operations
         if 'data_cache' not in st.session_state:
             st.session_state.data_cache = {}
@@ -130,7 +174,7 @@ class RMSAIDashboard:
                 chunks_df = pd.read_sql_query("""
                     SELECT chunk_id, event_id, source_file, lead_name,
                            anomaly_status, anomaly_type, error_score,
-                           processing_timestamp, vector_id
+                           processing_timestamp, vector_id, metadata
                     FROM chunks
                     ORDER BY processing_timestamp DESC
                     LIMIT 5000
@@ -161,6 +205,25 @@ class RMSAIDashboard:
                         return 'Unknown'
 
                     chunks_df['patient_id'] = chunks_df['source_file'].apply(extract_patient_id)
+
+                    # Extract heart rate from metadata JSON
+                    def extract_heart_rate(metadata_json):
+                        if pd.isna(metadata_json) or not metadata_json:
+                            return None
+                        try:
+                            import json
+                            metadata = json.loads(metadata_json)
+                            return metadata.get('heart_rate', None)
+                        except (json.JSONDecodeError, TypeError):
+                            return None
+
+                    chunks_df['heart_rate'] = chunks_df['metadata'].apply(extract_heart_rate)
+
+                    # DEBUG: Check heart rate extraction for event_1006
+                    event_1006_sample = chunks_df[chunks_df['event_id'] == 'event_1006'].head(1)
+                    if not event_1006_sample.empty:
+                        hr = event_1006_sample.iloc[0]['heart_rate']
+                        print(f"🔍 DEBUG LOAD: event_1006 heart_rate = {hr} (type: {type(hr)})")
 
                     # Add condition column - map from anomaly types or infer from pattern
                     def infer_condition(row):
@@ -892,13 +955,6 @@ class RMSAIDashboard:
         }).rename(columns={'chunk_id': 'total_chunks'})
 
         # Process AI Anomaly Verdict - unique anomalies with most severe first
-        severity_order = {
-            'Ventricular Tachycardia (MIT-BIH)': 5,
-            'Atrial Fibrillation (PTB-XL)': 4,
-            'Unknown Arrhythmia': 3,
-            'Tachycardia': 2,
-            'Bradycardia': 1
-        }
 
         def process_ai_verdict(anomaly_types_list, total_chunks, anomaly_count):
             if not anomaly_types_list or anomaly_count == 0:
@@ -906,11 +962,11 @@ class RMSAIDashboard:
 
             # Get unique anomaly types and sort by severity
             unique_anomalies = list(set(anomaly_types_list))
-            unique_anomalies.sort(key=lambda x: severity_order.get(x, 0), reverse=True)
+            sorted_anomalies = sort_by_severity(unique_anomalies)
 
-            if len(unique_anomalies) == 1:
+            if len(sorted_anomalies) == 1:
                 # Single anomaly type
-                anomaly = unique_anomalies[0]
+                anomaly = sorted_anomalies[0]
                 percentage = (anomaly_count / total_chunks) * 100
                 if percentage < 30:
                     return f"{anomaly} ({percentage:.0f}%)"
@@ -918,7 +974,7 @@ class RMSAIDashboard:
                     return anomaly
             else:
                 # Multiple anomaly types
-                return ", ".join(unique_anomalies)
+                return ", ".join(sorted_anomalies)
 
         grouped['ai_anomaly_verdict'] = grouped.apply(
             lambda row: process_ai_verdict(
@@ -1042,129 +1098,6 @@ class RMSAIDashboard:
         else:
             st.warning("No events match the selected filters")
 
-    def render_patient_specific(self, chunks_df: pd.DataFrame):
-        """Render Patient Specific view"""
-        st.header("👤 Patient Specific Analysis")
-        st.markdown("*Patient-focused view with event summaries and anomaly patterns*")
-
-        if len(chunks_df) == 0:
-            st.warning("No patient data available")
-            return
-
-        # Patient selection
-        patients = sorted(chunks_df['patient_id'].unique()) if 'patient_id' in chunks_df.columns else []
-
-        if not patients:
-            st.warning("No patient IDs found in the data")
-            return
-
-        selected_patient = st.selectbox("Select Patient", patients)
-
-        if not selected_patient:
-            return
-
-        # Filter data for selected patient
-        patient_data = chunks_df[chunks_df['patient_id'] == selected_patient]
-
-        # Aggregate by event for this patient
-        patient_events = patient_data.groupby('event_id', as_index=False).agg({
-            'condition': 'first',
-            'anomaly_type': lambda x: [t for t in x if t and t != 'None' and pd.notna(t)],
-            'anomaly_status': lambda x: (x == 'anomaly').sum(),
-            'error_score': 'mean',
-            'timestamp': 'first',
-            'chunk_id': 'count'
-        }).rename(columns={'chunk_id': 'total_chunks'})
-
-        # Process AI Verdict for each event
-        severity_order = {
-            'Ventricular Tachycardia (MIT-BIH)': 5,
-            'Atrial Fibrillation (PTB-XL)': 4,
-            'Unknown Arrhythmia': 3,
-            'Tachycardia': 2,
-            'Bradycardia': 1
-        }
-
-        def get_event_ai_verdict(anomaly_types_list):
-            if not anomaly_types_list:
-                return "Normal"
-
-            unique_anomalies = list(set(anomaly_types_list))
-            unique_anomalies.sort(key=lambda x: severity_order.get(x, 0), reverse=True)
-
-            return ", ".join(unique_anomalies)
-
-        patient_events['ai_verdict'] = patient_events['anomaly_type'].apply(get_event_ai_verdict)
-
-        # Patient summary stats
-        st.subheader(f"Patient {selected_patient} - Summary")
-
-        col1, col2, col3, col4 = st.columns(4)
-
-        with col1:
-            total_events = len(patient_events)
-            st.metric("Total Events", f"{total_events:,}")
-
-        with col2:
-            anomaly_events = (patient_events['ai_verdict'] != 'Normal').sum()
-            st.metric("Anomaly Events", f"{anomaly_events:,}")
-
-        with col3:
-            if total_events > 0:
-                anomaly_rate = (anomaly_events / total_events) * 100
-                st.metric("Anomaly Rate", f"{anomaly_rate:.1f}%")
-            else:
-                st.metric("Anomaly Rate", "0%")
-
-        with col4:
-            avg_error = patient_events['error_score'].mean()
-            st.metric("Avg Error Score", f"{avg_error:.4f}")
-
-        # Most common anomalies
-        all_anomalies = []
-        for anomaly_list in patient_events['anomaly_type']:
-            all_anomalies.extend(anomaly_list)
-
-        if all_anomalies:
-            anomaly_counts = pd.Series(all_anomalies).value_counts()
-            st.subheader("Most Common Anomalies")
-
-            fig = px.bar(
-                x=anomaly_counts.index,
-                y=anomaly_counts.values,
-                title=f"Anomaly Distribution for Patient {selected_patient}",
-                labels={'x': 'Anomaly Type', 'y': 'Count'}
-            )
-            fig.update_layout(xaxis_tickangle=-45)
-            st.plotly_chart(fig, width='stretch')
-
-        # Events table
-        st.subheader("Patient Events")
-
-        # Format for display
-        display_events = patient_events[['event_id', 'condition', 'ai_verdict', 'error_score', 'timestamp']].copy()
-        display_events.columns = ['Event ID', 'Reported Condition', 'AI Verdict', 'Avg Error Score', 'Timestamp']
-        display_events['Avg Error Score'] = display_events['Avg Error Score'].round(4)
-        display_events['Timestamp'] = pd.to_datetime(display_events['Timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
-
-        # Sort by timestamp descending
-        display_events = display_events.sort_values('Timestamp', ascending=False)
-
-        # Pagination for patient events
-        rows_per_page = st.selectbox("Events per page", [5, 10, 20, 50], index=1, key="patient_pagination")
-
-        if len(display_events) > 0:
-            total_pages = (len(display_events) - 1) // rows_per_page + 1
-            page = st.selectbox("Page", range(1, total_pages + 1), key="patient_page")
-
-            start_idx = (page - 1) * rows_per_page
-            end_idx = start_idx + rows_per_page
-
-            st.dataframe(display_events.iloc[start_idx:end_idx], use_container_width=True, hide_index=True)
-
-            st.info(f"Showing {min(rows_per_page, len(display_events) - start_idx)} of {len(display_events)} events (Page {page} of {total_pages})")
-        else:
-            st.warning("No events found for this patient")
 
     def _get_ground_truth_conditions(self, chunks_df: pd.DataFrame) -> Dict[str, str]:
         """Extract ground truth conditions from HDF5 files"""
@@ -1393,7 +1326,7 @@ class RMSAIDashboard:
                 if event_id in f:
                     event_group = f[event_id]
 
-                    # Event information from attributes (Ground Truth)
+                    # Event information from attributes (Event Condition)
                     if hasattr(event_group, 'attrs'):
                         for attr_name in event_group.attrs.keys():
                             val = event_group.attrs[attr_name]
@@ -2048,7 +1981,7 @@ class RMSAIDashboard:
             })
 
             ai_analysis_rows.append({
-                'Analysis Parameter': 'Ground Truth Condition',
+                'Analysis Parameter': 'Event Condition',
                 'Result': ai_data.get('event_condition', 'Unknown')
             })
 
@@ -2205,7 +2138,8 @@ class RMSAIDashboard:
                         'anomaly_type': lambda x: [t for t in x if t and t != 'None' and pd.notna(t)],
                         'anomaly_status': lambda x: (x == 'anomaly').sum(),
                         'error_score': 'mean',
-                        'chunk_id': 'count'
+                        'chunk_id': 'count',
+                        'heart_rate': 'first'
                     }
 
                     # Add timestamp field if it exists
@@ -2217,22 +2151,15 @@ class RMSAIDashboard:
                     patient_events = patient_data.groupby('event_id', as_index=False).agg(agg_dict).rename(columns={'chunk_id': 'total_chunks'})
 
                     # AI verdict calculation with severity order
-                    severity_order = {
-                        'Ventricular Tachycardia (MIT-BIH)': 5,
-                        'Atrial Fibrillation (PTB-XL)': 4,
-                        'Unknown Arrhythmia': 3,
-                        'Tachycardia': 2,
-                        'Bradycardia': 1
-                    }
 
-                    def get_ai_verdict(anomaly_types_list):
-                        if not anomaly_types_list:
-                            return "Normal"
-                        unique_anomalies = list(set(anomaly_types_list))
-                        unique_anomalies.sort(key=lambda x: severity_order.get(x, 0), reverse=True)
-                        return ", ".join(unique_anomalies)
-
-                    patient_events['ai_verdict'] = patient_events['anomaly_type'].apply(get_ai_verdict)
+                    # Use unified AI verdict function with HR-based logic
+                    patient_events['ai_verdict'] = patient_events.apply(
+                        lambda row: self.get_unified_ai_verdict(
+                            row['anomaly_type'],
+                            row['heart_rate'],
+                            row['anomaly_status']
+                        ), axis=1
+                    )
                     patient_events['event_condition'] = patient_events['event_id'].map(ground_truth_conditions).fillna('Unknown')
 
                     # Patient Summary Statistics
@@ -2257,7 +2184,7 @@ class RMSAIDashboard:
                         ['Patient ID', patient_id],
                         ['Total Events', f"{total_events:,}"],
                         ['AI Detected Anomalies', f"{anomaly_events:,}"],
-                        ['AI Accuracy vs Ground Truth', f"{accuracy:.1f}%"],
+                        ['AI Accuracy vs Event Condition', f"{accuracy:.1f}%"],
                         ['Average Error Score', f"{avg_error:.4f}"],
                         ['Report Generated', datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')]
                     ]
@@ -2299,7 +2226,7 @@ class RMSAIDashboard:
                 ['Parameter', 'Value'],
                 ['Patient ID', patient_id],
                 ['Event ID', event_id],
-                ['Event Condition (Ground Truth)', event_info.get('condition', ai_data.get('event_condition', 'Unknown'))],
+                ['Event Condition', event_info.get('condition', ai_data.get('event_condition', 'Unknown'))],
                 ['AI Verdict', ai_data.get('ai_verdict', 'Unknown')],
                 ['Event UUID', event_info.get('uuid', f"{patient_id}_{event_id}")],
             ]
@@ -2703,7 +2630,7 @@ class RMSAIDashboard:
             analysis_data = [
                 ['Analysis Parameter', 'Result'],
                 ['AI Verdict', ai_data.get('ai_verdict', 'Unknown')],
-                ['Ground Truth Condition', ai_data.get('event_condition', 'Unknown')],
+                ['Event Condition', ai_data.get('event_condition', 'Unknown')],
                 ['Average Error Score', f"{ai_data.get('error_score', 0):.4f}" if isinstance(ai_data.get('error_score'), (int, float)) else str(ai_data.get('error_score', 'N/A'))],
                 ['Analysis Timestamp', str(ai_data.get('timestamp', 'Unknown'))],
                 ['Model Version', str(device_info.get('model_version', device_info.get('software_version', device_info.get('ai_model_version', 'Unknown'))))]
@@ -2754,7 +2681,7 @@ class RMSAIDashboard:
     def render_patient_analysis(self, chunks_df: pd.DataFrame):
         """Render combined Patient Analysis view with both events and patient-specific data"""
         st.header("👥 Patient Analysis")
-        st.markdown("*Comprehensive patient view with event-level analysis and AI vs ground truth comparison*")
+        st.markdown("*Comprehensive patient view with event-level analysis and AI vs event condition comparison*")
 
         if len(chunks_df) == 0:
             st.warning("No patient data available")
@@ -2800,12 +2727,17 @@ class RMSAIDashboard:
                 ground_truth_conditions = self._get_ground_truth_conditions(event_data)
                 ai_data['event_condition'] = ground_truth_conditions.get(event_id, 'Unknown')
 
-                # Get AI verdict for this event
-                event_anomaly_types = event_data['anomaly_type'].dropna().tolist()
-                if event_anomaly_types and any(t for t in event_anomaly_types if t and t != 'None'):
-                    ai_data['ai_verdict'] = event_anomaly_types[0]  # Simplified - take first anomaly type
-                else:
-                    ai_data['ai_verdict'] = 'Normal'
+                # Get AI verdict for this event using unified HR-enhanced logic
+                event_anomaly_types = [t for t in event_data['anomaly_type'].dropna().tolist() if t and t != 'None']
+                anomaly_status_count = (event_data['anomaly_status'] == 'anomaly').sum()
+                heart_rate = event_data['heart_rate'].iloc[0] if 'heart_rate' in event_data.columns else None
+
+                # Use unified AI verdict function
+                ai_data['ai_verdict'] = self.get_unified_ai_verdict(
+                    event_anomaly_types,
+                    heart_rate,
+                    anomaly_status_count
+                )
 
                 # Render the report
                 self._render_event_report(selected_patient, event_id, source_file, ai_data)
@@ -2829,27 +2761,24 @@ class RMSAIDashboard:
             'anomaly_status': lambda x: (x == 'anomaly').sum(),
             'error_score': 'mean',
             'timestamp': 'first',
-            'chunk_id': 'count'
+            'chunk_id': 'count',
+            'heart_rate': 'first'
         }).rename(columns={'chunk_id': 'total_chunks'})
 
-        # Add ground truth and AI verdict
-        def get_ai_verdict(anomaly_types_list):
-            if not anomaly_types_list:
-                return "Normal"
+        # Add AI verdict using unified function with HR-based logic
+        def debug_patient_analysis_verdict(row):
+            result = self.get_unified_ai_verdict(
+                row['anomaly_type'],
+                row['heart_rate'],
+                row['anomaly_status']
+            )
+            # DEBUG: Print for event_1006 in Patient Analysis
+            if str(row.get('heart_rate')) == "109.1":
+                print(f"🔍 DEBUG Patient Analysis event_1006: HR={row['heart_rate']}, anomaly_count={row['anomaly_status']}, anomalies={row['anomaly_type']}")
+                print(f"🔍 DEBUG Patient Analysis: AI Verdict Result = {result}")
+            return result
 
-            severity_order = {
-                'Ventricular Tachycardia (MIT-BIH)': 5,
-                'Atrial Fibrillation (PTB-XL)': 4,
-                'Unknown Arrhythmia': 3,
-                'Tachycardia': 2,
-                'Bradycardia': 1
-            }
-
-            unique_anomalies = list(set(anomaly_types_list))
-            unique_anomalies.sort(key=lambda x: severity_order.get(x, 0), reverse=True)
-            return ", ".join(unique_anomalies)
-
-        patient_events['ai_verdict'] = patient_events['anomaly_type'].apply(get_ai_verdict)
+        patient_events['ai_verdict'] = patient_events.apply(debug_patient_analysis_verdict, axis=1)
         patient_events['event_condition'] = patient_events['event_id'].map(ground_truth_conditions).fillna('Unknown')
 
         with col1:
@@ -2861,7 +2790,7 @@ class RMSAIDashboard:
             st.metric("AI Detected Anomalies", f"{anomaly_events:,}")
 
         with col3:
-            # Accuracy calculation (AI vs Ground Truth)
+            # Accuracy calculation (AI vs Event Condition)
             if total_events > 0:
                 # Simple accuracy: count when AI verdict matches event condition
                 matches = 0
@@ -2884,8 +2813,47 @@ class RMSAIDashboard:
             avg_error = patient_events['error_score'].mean()
             st.metric("Avg Error Score", f"{avg_error:.4f}")
 
+        # Event Summary Table (with HR-based AI verdicts)
+        st.subheader("Event Summary - HR-Enhanced AI Verdicts")
+
+        # Create event summary table
+        event_summary = patient_events[['event_id', 'event_condition', 'ai_verdict', 'heart_rate', 'error_score', 'total_chunks']].copy()
+        event_summary.columns = ['Event ID', 'Event Condition', 'AI Verdict (HR-Enhanced)', 'Heart Rate (BPM)', 'Avg Error', 'Total Chunks']
+        event_summary['Avg Error'] = event_summary['Avg Error'].round(4)
+        event_summary['Heart Rate (BPM)'] = event_summary['Heart Rate (BPM)'].round(1)
+
+        # Add comparison column with detailed mismatch detection
+        def compare_enhanced_verdict(row):
+            ai_verdict = row['AI Verdict (HR-Enhanced)']
+            ground_truth = row['Event Condition']
+
+            if ground_truth == 'Unknown':
+                return "🔍 Unknown GT"
+            elif ai_verdict == 'Normal' and ground_truth == 'Normal':
+                return "✅ Match"
+            elif ai_verdict == 'Normal' and ground_truth != 'Normal':
+                return "❌ Missed"
+            elif ai_verdict != 'Normal' and ground_truth == 'Normal':
+                return "❌ False Positive"
+            elif ai_verdict != 'Normal' and ground_truth != 'Normal' and ground_truth != 'Unknown':
+                # Both detected anomalies - check if types match
+                if ai_verdict == ground_truth:
+                    return "✅ Match"
+                else:
+                    return "🔄 Mismatch"  # Different anomaly types detected
+            else:
+                return "❓ Unclear"
+
+        event_summary['Comparison'] = event_summary.apply(compare_enhanced_verdict, axis=1)
+
+        # Sort by event ID
+        event_summary = event_summary.sort_values('Event ID')
+
+        # Display event summary table
+        st.dataframe(event_summary, use_container_width=True, hide_index=True)
+
         # Event-level analysis table
-        st.subheader("Event Analysis - AI vs Ground Truth")
+        st.subheader("Event Analysis - AI vs Event Condition")
 
         # Aggregate data by event and lead for detailed view
         events_by_lead = patient_data.groupby(['event_id', 'lead_name'], as_index=False).agg({
@@ -2893,71 +2861,67 @@ class RMSAIDashboard:
             'anomaly_type': lambda x: [t for t in x if t and t != 'None' and pd.notna(t)],
             'error_score': 'mean',
             'timestamp': 'first',
-            'chunk_id': 'count'
+            'chunk_id': 'count',
+            'heart_rate': 'first'  # Heart rate is same for all chunks in an event
         }).rename(columns={'chunk_id': 'total_chunks'})
 
-        # Process AI verdicts for each lead
-        def process_lead_ai_verdict(anomaly_types_list, total_chunks, anomaly_count):
-            if not anomaly_types_list or anomaly_count == 0:
-                return "Normal"
+        # Use unified AI verdict function with HR-enhanced logic for lead-level analysis
+        # Note: HR logic applies at event level, so we apply it even for individual leads
+        def process_lead_ai_verdict_enhanced(row):
+            anomaly_types_list = row['anomaly_type']
+            total_chunks = row['total_chunks']
+            anomaly_count = row['anomaly_status']
+            heart_rate = row['heart_rate']
 
-            severity_order = {
-                'Ventricular Tachycardia (MIT-BIH)': 5,
-                'Atrial Fibrillation (PTB-XL)': 4,
-                'Unknown Arrhythmia': 3,
-                'Tachycardia': 2,
-                'Bradycardia': 1
-            }
+            # First, try unified HR-enhanced logic
+            base_verdict = self.get_unified_ai_verdict(anomaly_types_list, heart_rate, anomaly_count)
 
-            unique_anomalies = list(set(anomaly_types_list))
-            unique_anomalies.sort(key=lambda x: severity_order.get(x, 0), reverse=True)
-
-            if len(unique_anomalies) == 1:
-                anomaly = unique_anomalies[0]
+            # If we have anomalies and want to show percentage for low confidence
+            if base_verdict != "Normal" and len(set(anomaly_types_list)) == 1 and anomaly_count > 0:
                 percentage = (anomaly_count / total_chunks) * 100
                 if percentage < 30:
-                    return f"{anomaly} ({percentage:.0f}%)"
+                    return f"{base_verdict} ({percentage:.0f}%)"
                 else:
-                    return anomaly
+                    return base_verdict
             else:
-                return ", ".join(unique_anomalies)
+                return base_verdict
 
-        events_by_lead['ai_verdict'] = events_by_lead.apply(
-            lambda row: process_lead_ai_verdict(
-                row['anomaly_type'],
-                row['total_chunks'],
-                row['anomaly_status']
-            ),
-            axis=1
-        )
+        events_by_lead['ai_verdict'] = events_by_lead.apply(process_lead_ai_verdict_enhanced, axis=1)
 
         # Add ground truth
         events_by_lead['event_condition'] = events_by_lead['event_id'].map(ground_truth_conditions).fillna('Unknown')
 
         # Format for display
         display_events = events_by_lead[['event_id', 'lead_name', 'event_condition', 'ai_verdict', 'error_score', 'timestamp']].copy()
-        display_events.columns = ['Event ID', 'Lead', 'Event Condition (Ground Truth)', 'AI Verdict', 'Avg Error Score', 'Timestamp']
+        display_events.columns = ['Event ID', 'Lead', 'Event Condition', 'AI Verdict', 'Avg Error Score', 'Timestamp']
         display_events['Avg Error Score'] = display_events['Avg Error Score'].round(4)
         display_events['Timestamp'] = pd.to_datetime(display_events['Timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
 
         # Sort by timestamp descending
         display_events = display_events.sort_values('Timestamp', ascending=False)
 
-        # Add comparison column
+        # Add comparison column with detailed mismatch detection
         def compare_verdict(row):
-            event_condition = row['Event Condition (Ground Truth)']
+            event_condition = row['Event Condition']
             ai_verdict = row['AI Verdict']
+
+            # Handle percentage annotations (e.g., "Tachycardia (15%)")
+            ai_verdict_clean = ai_verdict.split(' (')[0] if '(' in ai_verdict else ai_verdict
 
             if event_condition == 'Unknown':
                 return "🔍 Unknown GT"
-            elif ai_verdict == 'Normal' and event_condition == 'Normal':
+            elif ai_verdict_clean == 'Normal' and event_condition == 'Normal':
                 return "✅ Match"
-            elif ai_verdict != 'Normal' and event_condition != 'Normal' and event_condition != 'Unknown':
-                return "✅ Match"
-            elif ai_verdict == 'Normal' and event_condition != 'Normal':
+            elif ai_verdict_clean == 'Normal' and event_condition != 'Normal':
                 return "❌ Missed"
-            elif ai_verdict != 'Normal' and event_condition == 'Normal':
+            elif ai_verdict_clean != 'Normal' and event_condition == 'Normal':
                 return "❌ False Positive"
+            elif ai_verdict_clean != 'Normal' and event_condition != 'Normal' and event_condition != 'Unknown':
+                # Both detected anomalies - check if types match
+                if ai_verdict_clean == event_condition:
+                    return "✅ Match"
+                else:
+                    return "🔄 Mismatch"  # Different anomaly types detected
             else:
                 return "❓ Unclear"
 
@@ -2971,7 +2935,7 @@ class RMSAIDashboard:
             selected_event = st.selectbox("Filter by Event", event_ids, key="event_filter")
 
         with col2:
-            conditions = ['All'] + list(display_events['Event Condition (Ground Truth)'].unique())
+            conditions = ['All'] + list(display_events['Event Condition'].unique())
             selected_condition = st.selectbox("Filter by Condition", conditions, key="condition_filter")
 
         with col3:
@@ -2983,7 +2947,7 @@ class RMSAIDashboard:
         if selected_event != 'All':
             filtered_events = filtered_events[filtered_events['Event ID'] == selected_event]
         if selected_condition != 'All':
-            filtered_events = filtered_events[filtered_events['Event Condition (Ground Truth)'] == selected_condition]
+            filtered_events = filtered_events[filtered_events['Event Condition'] == selected_condition]
         if selected_comparison != 'All':
             filtered_events = filtered_events[filtered_events['Comparison'] == selected_comparison]
 
@@ -3018,7 +2982,7 @@ class RMSAIDashboard:
 
                     cols[0].write(row['Event ID'])
                     cols[1].write(row['Lead'])
-                    cols[2].write(row['Event Condition (Ground Truth)'])
+                    cols[2].write(row['Event Condition'])
                     cols[3].write(row['AI Verdict'])
                     cols[4].write(f"{row['Avg Error Score']:.4f}")
                     cols[5].write(row['Timestamp'])
@@ -3079,7 +3043,7 @@ class RMSAIDashboard:
                 fig = px.pie(
                     values=comparison_counts.values,
                     names=comparison_counts.index,
-                    title=f"AI vs Ground Truth Comparison for Patient {selected_patient}",
+                    title=f"AI vs Event Condition Comparison for Patient {selected_patient}",
                     color_discrete_map={
                         '✅ Match': 'green',
                         '❌ Missed': 'red',

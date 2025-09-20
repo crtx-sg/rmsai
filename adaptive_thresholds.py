@@ -33,6 +33,7 @@ from typing import Dict, List, Tuple, Optional, Any
 import logging
 import json
 from datetime import datetime, timedelta
+from config import DEFAULT_CONDITION_THRESHOLDS, ADAPTIVE_THRESHOLD_RANGES, CONDITION_NAMES
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -64,50 +65,34 @@ class AdaptiveThresholdManager:
         self.load_initial_thresholds()
 
     def load_initial_thresholds(self):
-        """Load initial condition-specific thresholds"""
-        self.thresholds = {
-            'Normal': {
-                'threshold': 0.05,
+        """Load initial condition-specific thresholds from config"""
+        self.thresholds = {}
+
+        # Initialize from centralized config
+        for condition, threshold in DEFAULT_CONDITION_THRESHOLDS.items():
+            self.thresholds[condition] = {
+                'threshold': threshold,
                 'confidence': 0.8,
-                'last_updated': datetime.now().isoformat(),
-                'update_count': 0,
-                'performance_history': []
-            },
-            'Tachycardia': {
-                'threshold': 0.08,
-                'confidence': 0.8,
-                'last_updated': datetime.now().isoformat(),
-                'update_count': 0,
-                'performance_history': []
-            },
-            'Bradycardia': {
-                'threshold': 0.07,
-                'confidence': 0.8,
-                'last_updated': datetime.now().isoformat(),
-                'update_count': 0,
-                'performance_history': []
-            },
-            'Atrial Fibrillation (PTB-XL)': {
-                'threshold': 0.12,
-                'confidence': 0.8,
-                'last_updated': datetime.now().isoformat(),
-                'update_count': 0,
-                'performance_history': []
-            },
-            'Ventricular Tachycardia (MIT-BIH)': {
-                'threshold': 0.15,
-                'confidence': 0.8,
-                'last_updated': datetime.now().isoformat(),
-                'update_count': 0,
-                'performance_history': []
-            },
-            'Unknown': {
-                'threshold': 0.10,
-                'confidence': 0.7,
                 'last_updated': datetime.now().isoformat(),
                 'update_count': 0,
                 'performance_history': []
             }
+
+        # Add Normal and Unknown conditions
+        self.thresholds['Normal'] = {
+            'threshold': 0.05,
+            'confidence': 0.8,
+            'last_updated': datetime.now().isoformat(),
+            'update_count': 0,
+            'performance_history': []
+        }
+
+        self.thresholds['Unknown Arrhythmia'] = {
+            'threshold': 0.10,
+            'confidence': 0.7,
+            'last_updated': datetime.now().isoformat(),
+            'update_count': 0,
+            'performance_history': []
         }
 
         logger.info(f"Initialized thresholds for {len(self.thresholds)} conditions")

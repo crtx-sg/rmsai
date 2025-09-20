@@ -38,6 +38,7 @@ import pandas as pd
 import torch
 import h5py
 from sklearn.preprocessing import StandardScaler
+from config import DEFAULT_CONDITION_THRESHOLDS, ADAPTIVE_THRESHOLD_RANGES, HR_THRESHOLDS
 
 # File monitoring
 try:
@@ -95,35 +96,23 @@ class RMSAIConfig:
         # Model loading configuration
         self.model_loading_method = "auto"  # "auto", "method1", "method2", "method3"
 
-        # Anomaly detection thresholds
+        # Anomaly detection thresholds (use shared configuration)
         self.anomaly_threshold = 0.1  # Base threshold for MSE
-        self.condition_thresholds = {
-            'Normal': 0.8,  # Based on observed avg score of 0.6970
-            'Tachycardia': 0.85,  # Based on observed avg score of 0.6378
-            'Bradycardia': 0.85,  # Same as Tachycardia
-            'Atrial Fibrillation (PTB-XL)': 0.9,  # Based on observed avg score of 0.6970
-            'Ventricular Tachycardia (MIT-BIH)': 1.0  # Based on observed avg score of 0.8742
-        }
+        self.condition_thresholds = DEFAULT_CONDITION_THRESHOLDS.copy()
 
         # Adaptive threshold configuration
         self.enable_adaptive_thresholds = False # True
         self.adaptation_rate = 0.1  # How quickly to adapt (0.0-1.0)
         self.min_samples_for_adaptation = 10  # Minimum samples before adapting
-        self.threshold_multipliers = {  # Safety bounds
-            'Normal': (0.5, 2.0),      # Can adjust between 50%-200% of base
-            'Tachycardia': (0.8, 1.5),
-            'Bradycardia': (0.8, 1.5),
-            'Atrial Fibrillation (PTB-XL)': (0.9, 1.3),
-            'Ventricular Tachycardia (MIT-BIH)': (0.95, 1.2)
-        }
+        self.threshold_multipliers = ADAPTIVE_THRESHOLD_RANGES.copy()  # Use shared configuration
 
         # Running statistics for adaptive thresholds
         self.condition_scores = {}  # Track scores per condition
         self.condition_counts = {}  # Track sample counts per condition
 
-        # Heart rate ranges for Tachy/Brady classification
-        self.bradycardia_max_hr = 60   # <= 60 BPM is bradycardia
-        self.tachycardia_min_hr = 100  # >= 100 BPM is tachycardia
+        # Heart rate ranges for Tachy/Brady classification (use shared configuration)
+        self.bradycardia_max_hr = HR_THRESHOLDS['bradycardia_max']
+        self.tachycardia_min_hr = HR_THRESHOLDS['tachycardia_min']
 
         # Processing configuration
         self.batch_size = 1
@@ -671,7 +660,8 @@ class ECGChunkProcessor:
                 "condition": condition,
                 "embedding_dim": len(embedding),
                 "reconstruction_error": error_score,
-                "chunk_length": len(chunk_data)
+                "chunk_length": len(chunk_data),
+                "heart_rate": heart_rate
             }
 
             self.metadata_db.store_chunk_result(
