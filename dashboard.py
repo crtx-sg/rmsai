@@ -43,7 +43,7 @@ from config import CLINICAL_SEVERITY_ORDER, HR_THRESHOLDS, sort_by_severity, get
 
 # Configure Streamlit page
 st.set_page_config(
-    page_title="RMSAI Anomaly Detection Dashboard",
+    page_title="RMS.AI ECG Anomaly Detection Dashboard",
     page_icon="🫀",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -2134,7 +2134,7 @@ class RMSAIDashboard:
             story = []
 
             # Header
-            story.append(Paragraph("RMSAI ECG Event Analysis Report", title_style))
+            story.append(Paragraph("RMS.AI Event Analysis Report", title_style))
             story.append(Spacer(1, 12))
 
             # === PATIENT ANALYSIS SECTION ===
@@ -2151,6 +2151,18 @@ class RMSAIDashboard:
                     # Extract patient ID and get ground truth
                     patient_data['patient_id'] = patient_data['source_file'].str.extract(r'([A-Z0-9]+)_\d{4}-\d{2}\.h5')[0]
                     patient_data = patient_data[patient_data['patient_id'] == patient_id]
+
+                    # Extract heart rate from metadata JSON (same logic as dashboard)
+                    def extract_heart_rate(metadata_json):
+                        if pd.isna(metadata_json) or not metadata_json:
+                            return None
+                        try:
+                            metadata = json.loads(metadata_json)
+                            return metadata.get('heart_rate', None)
+                        except (json.JSONDecodeError, TypeError):
+                            return None
+
+                    patient_data['heart_rate'] = patient_data['metadata'].apply(extract_heart_rate)
                     ground_truth_conditions = self._get_ground_truth_conditions(patient_data)
 
                     # Calculate patient summary stats - handle different timestamp column names

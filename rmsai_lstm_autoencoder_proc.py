@@ -808,8 +808,9 @@ class HDF5FileProcessor:
                     for chunk_start in range(0, len(ecg_data) - chunk_size + 1, step_size):
                         ecg_chunk = ecg_data[chunk_start:chunk_start + chunk_size]
 
-                        # Create unique chunk ID for each sub-chunk
-                        chunk_id = f"chunk_{event_key.split('_')[1]}{lead_idx}_{chunk_start}"
+                        # Create unique chunk ID for each sub-chunk (include source file for uniqueness)
+                        source_basename = Path(source_file).stem  # e.g., "PT1704_2025-09" from "data/PT1704_2025-09.h5"
+                        chunk_id = f"chunk_{source_basename}_{event_key.split('_')[1]}{lead_idx}_{chunk_start}"
 
                         # Process chunk
                         result = self.chunk_processor.process_chunk(
