@@ -780,9 +780,11 @@ processor.configure_leads([])  # Falls back to all available leads
 
 ## Adaptive Anomaly Detection Thresholds
 
-### 🧠 **Intelligent Threshold Adjustment (New Feature)**
+### 🧠 **Intelligent Threshold Adjustment**
 
 The RMSAI system features adaptive anomaly detection thresholds that automatically adjust based on observed reconstruction error patterns, improving accuracy and reducing false positives.
+
+**Configuration**: All threshold settings are centralized in `config.py` with `ENABLE_ADAPTIVE_THRESHOLDS = False` by default for system stability.
 
 #### **Key Benefits:**
 - **Self-Tuning**: Automatically adjusts to model performance characteristics
@@ -813,8 +815,8 @@ condition_thresholds = {
 
 ##### **Configuration Options:**
 ```python
-# Enable/disable adaptive behavior
-config.enable_adaptive_thresholds = True
+# Enable/disable adaptive behavior (default: False in config.py)
+config.enable_adaptive_thresholds = False  # Disabled by default for stability
 
 # Adaptation rate (0.0-1.0) - how quickly thresholds adapt
 config.adaptation_rate = 0.1  # 10% blend rate
@@ -824,11 +826,11 @@ config.min_samples_for_adaptation = 10
 
 # Safety bounds per condition (min_multiplier, max_multiplier)
 config.threshold_multipliers = {
-    'Normal': (0.5, 2.0),                    # Can adjust 50%-200% of base
-    'Tachycardia': (0.8, 1.5),              # More conservative
-    'Bradycardia': (0.8, 1.5),
-    'Atrial Fibrillation (PTB-XL)': (0.9, 1.3),
-    'Ventricular Tachycardia (MIT-BIH)': (0.95, 1.2)  # Most conservative
+    'Normal': (0.6, 1.0),                    # Range: 0.48-0.8 for base 0.8
+    'Tachycardia': (0.7, 1.0),              # Range: 0.595-0.85 for base 0.85
+    'Bradycardia': (0.7, 1.0),              # Range: 0.595-0.85 for base 0.85
+    'Atrial Fibrillation (PTB-XL)': (0.75, 1.05),  # Range: 0.675-0.945 for base 0.9
+    'Ventricular Tachycardia (MIT-BIH)': (0.85, 1.15)  # Range: 0.85-1.15 for base 1.0
 }
 ```
 
@@ -964,6 +966,7 @@ Output: "anomaly - Unknown Arrhythmia (score: 0.9200, HR: 75)"
 ##### **Shared Reconstruction Thresholds:**
 | Condition | Threshold | Reasoning |
 |-----------|-----------|-----------|
+| Normal | 0.8 | Baseline for normal ECG patterns |
 | Tachycardia | 0.85 | Similar morphology to normal sinus rhythm |
 | Bradycardia | 0.85 | Similar morphology to normal sinus rhythm |
 | A-Fib | 0.9 | Distinct P-wave irregularities |
@@ -1911,13 +1914,13 @@ class RMSAIConfig:
     embedding_dim = 128  # Match actual model output
     ecg_samples_per_event = 2400  # 12 seconds at 200Hz
 
-    # Anomaly thresholds
+    # Anomaly thresholds (updated values)
     condition_thresholds = {
-        'Normal': 0.05,
-        'Tachycardia': 0.08,
-        'Bradycardia': 0.07,
-        'Atrial Fibrillation (PTB-XL)': 0.12,
-        'Ventricular Tachycardia (MIT-BIH)': 0.15
+        'Normal': 0.8,
+        'Tachycardia': 0.85,
+        'Bradycardia': 0.85,
+        'Atrial Fibrillation (PTB-XL)': 0.9,
+        'Ventricular Tachycardia (MIT-BIH)': 1.0
     }
 ```
 
@@ -2009,7 +2012,8 @@ HR_THRESHOLDS = {
 ```python
 # config.py
 DEFAULT_CONDITION_THRESHOLDS = {
-    'Atrial Fibrillation (PTB-XL)': 0.8,      # More sensitive
+    'Normal': 0.8,                            # Baseline for normal ECG
+    'Atrial Fibrillation (PTB-XL)': 0.9,      # More sensitive
     'Tachycardia': 0.85,
     'Bradycardia': 0.85,
     'Unknown Arrhythmia': 0.9,
@@ -2021,11 +2025,12 @@ DEFAULT_CONDITION_THRESHOLDS = {
 ```python
 # config.py
 ADAPTIVE_THRESHOLD_RANGES = {
-    'Atrial Fibrillation (PTB-XL)': (0.7, 0.95),    # Flexible range
-    'Tachycardia': (0.75, 1.0),
-    'Bradycardia': (0.75, 1.0),
-    'Unknown Arrhythmia': (0.8, 1.05),
-    'Ventricular Tachycardia (MIT-BIH)': (0.95, 1.2) # Conservative range
+    'Normal': (0.6, 1.0),                            # Flexible range for normal ECG
+    'Atrial Fibrillation (PTB-XL)': (0.75, 1.05),   # Updated range
+    'Tachycardia': (0.7, 1.0),
+    'Bradycardia': (0.7, 1.0),
+    'Unknown Arrhythmia': (0.75, 1.05),
+    'Ventricular Tachycardia (MIT-BIH)': (0.85, 1.15) # Conservative range
 }
 ```
 
