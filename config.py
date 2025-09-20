@@ -33,7 +33,8 @@ CONDITION_NAMES = {
 
 # Default reconstruction error thresholds per condition
 DEFAULT_CONDITION_THRESHOLDS = {
-    'Atrial Fibrillation (PTB-XL)': 0.8,
+    'Normal': 0.8,
+    'Atrial Fibrillation (PTB-XL)': 0.9,
     'Tachycardia': 0.85,
     'Bradycardia': 0.85,
     'Unknown Arrhythmia': 0.9,
@@ -42,11 +43,12 @@ DEFAULT_CONDITION_THRESHOLDS = {
 
 # Adaptive threshold ranges per condition (min, max)
 ADAPTIVE_THRESHOLD_RANGES = {
-    'Atrial Fibrillation (PTB-XL)': (0.7, 0.95),
-    'Tachycardia': (0.75, 1.0),
-    'Bradycardia': (0.75, 1.0),
-    'Unknown Arrhythmia': (0.8, 1.05),
-    'Ventricular Tachycardia (MIT-BIH)': (0.95, 1.2)
+    'Normal': (0.6, 1.0),
+    'Atrial Fibrillation (PTB-XL)': (0.75, 1.05),
+    'Tachycardia': (0.7, 1.0),
+    'Bradycardia': (0.7, 1.0),
+    'Unknown Arrhythmia': (0.75, 1.05),
+    'Ventricular Tachycardia (MIT-BIH)': (0.85, 1.15)
 }
 
 def get_severity_score(condition_name: str) -> int:
@@ -64,6 +66,9 @@ def is_tachycardia(heart_rate: float) -> bool:
 def is_normal_heart_rate(heart_rate: float) -> bool:
     """Check if heart rate is in normal range"""
     return HR_THRESHOLDS['bradycardia_max'] < heart_rate < HR_THRESHOLDS['tachycardia_min']
+
+# Adaptive threshold configuration
+ENABLE_ADAPTIVE_THRESHOLDS = False  # Default: disabled
 
 def sort_by_severity(anomaly_list: list) -> list:
     """Sort anomaly types by clinical severity (most severe first)"""

@@ -38,7 +38,7 @@ import pandas as pd
 import torch
 import h5py
 from sklearn.preprocessing import StandardScaler
-from config import DEFAULT_CONDITION_THRESHOLDS, ADAPTIVE_THRESHOLD_RANGES, HR_THRESHOLDS
+from config import DEFAULT_CONDITION_THRESHOLDS, ADAPTIVE_THRESHOLD_RANGES, HR_THRESHOLDS, ENABLE_ADAPTIVE_THRESHOLDS
 
 # File monitoring
 try:
@@ -101,7 +101,7 @@ class RMSAIConfig:
         self.condition_thresholds = DEFAULT_CONDITION_THRESHOLDS.copy()
 
         # Adaptive threshold configuration
-        self.enable_adaptive_thresholds = False # True
+        self.enable_adaptive_thresholds = ENABLE_ADAPTIVE_THRESHOLDS
         self.adaptation_rate = 0.1  # How quickly to adapt (0.0-1.0)
         self.min_samples_for_adaptation = 10  # Minimum samples before adapting
         self.threshold_multipliers = ADAPTIVE_THRESHOLD_RANGES.copy()  # Use shared configuration
