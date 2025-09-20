@@ -1668,21 +1668,41 @@ class RMSAIDashboard:
             lead_analysis_rows = []
 
             for lead_name, lead_info in leads.items():
-                quality_score = lead_info.get('quality_score', 0)
-                quality_icon = "🟢" if quality_score >= 80 else "🟡" if quality_score >= 60 else "🔴"
-
                 # Mark if this lead is configured for AI analysis
                 is_configured = lead_name in configured_leads if configured_leads else False
                 config_status = "✅ AI Configured" if is_configured else "⭕ Not Configured"
 
-                # This would be calculated from actual AI analysis results
-                anomaly_percentage = 15  # Placeholder
+                # Only show quality score and anomalous chunks for configured leads
+                if is_configured:
+                    quality_score = lead_info.get('quality_score', 0)
+                    quality_icon = "🟢" if quality_score >= 80 else "🟡" if quality_score >= 60 else "🔴"
+                    quality_text = f"{quality_icon} {quality_score:.1f}/100"
+
+                    # Get actual anomaly percentage from database for configured leads
+                    try:
+                        conn = sqlite3.connect(self.db_path)
+                        query = """
+                            SELECT
+                                COUNT(CASE WHEN anomaly_status = 'anomaly' THEN 1 END) * 100.0 / COUNT(*) as anomaly_pct
+                            FROM chunks
+                            WHERE event_id = ? AND source_file LIKE ? AND lead_name = ?
+                        """
+                        result = pd.read_sql_query(query, conn, params=[event_id, f"%{patient_id}%", lead_name])
+                        conn.close()
+                        anomaly_percentage = result['anomaly_pct'].iloc[0] if not result.empty else 0
+                        anomaly_text = f"{anomaly_percentage:.1f}%"
+                    except Exception:
+                        anomaly_text = "N/A"
+                else:
+                    # For non-configured leads, show N/A for AI-specific metrics
+                    quality_text = "N/A"
+                    anomaly_text = "N/A"
 
                 lead_analysis_rows.append({
                     'ECG Lead': lead_name,
                     'AI Configuration': config_status,
-                    'Quality Score': f"{quality_icon} {quality_score:.1f}/100",
-                    'Anomalous Chunks': f"{anomaly_percentage}%"
+                    'Quality Score': quality_text,
+                    'Anomalous Chunks': anomaly_text
                 })
 
             if lead_analysis_rows:
@@ -2167,16 +2187,24 @@ class RMSAIDashboard:
                     anomaly_events = (patient_events['ai_verdict'] != 'Normal').sum()
                     avg_error = patient_events['error_score'].mean()
 
-                    # Calculate accuracy
+                    # Calculate accuracy using proper comparison logic
                     matches = 0
+                    valid_events = 0
                     for _, row in patient_events.iterrows():
                         ai_verdict = row['ai_verdict']
                         event_condition = row['event_condition']
-                        if ai_verdict == 'Normal' and event_condition in ['Normal', 'Unknown']:
+
+                        # Skip unknown ground truth from accuracy calculation
+                        if event_condition == 'Unknown':
+                            continue
+
+                        valid_events += 1
+
+                        # Use same logic as Event Summary comparison - only exact matches count
+                        if ai_verdict == event_condition:
                             matches += 1
-                        elif ai_verdict != 'Normal' and event_condition != 'Normal' and event_condition != 'Unknown':
-                            matches += 1
-                    accuracy = (matches / total_events) * 100 if total_events > 0 else 0
+
+                    accuracy = (matches / valid_events) * 100 if valid_events > 0 else 0
 
                     # Patient Summary Table
                     summary_data = [
@@ -2317,16 +2345,38 @@ class RMSAIDashboard:
                 # ECG Lead Quality Analysis (simplified without repetitive data length/sampling rate)
                 lead_data = [['ECG Lead', 'AI Configuration', 'Quality Score', 'Anomalous Chunks']]
                 for lead_name, lead_info in leads.items():
-                    quality_score = lead_info.get('quality_score', 0)
                     is_configured = lead_name in configured_leads if configured_leads else False
                     config_status = "✓ AI Configured" if is_configured else "⭕ Not Configured"
-                    anomaly_percentage = 15  # Placeholder
+
+                    # Only show quality score and anomalous chunks for configured leads
+                    if is_configured:
+                        quality_score = lead_info.get('quality_score', 0)
+                        quality_score_text = f"{quality_score:.1f}/100"
+                        # Get actual anomaly percentage from database for configured leads
+                        try:
+                            conn = sqlite3.connect(self.db_path)
+                            query = """
+                                SELECT
+                                    COUNT(CASE WHEN anomaly_status = 'anomaly' THEN 1 END) * 100.0 / COUNT(*) as anomaly_pct
+                                FROM chunks
+                                WHERE event_id = ? AND source_file LIKE ? AND lead_name = ?
+                            """
+                            result = pd.read_sql_query(query, conn, params=[event_id, f"%{patient_id}%", lead_name])
+                            conn.close()
+                            anomaly_percentage = result['anomaly_pct'].iloc[0] if not result.empty else 0
+                            anomaly_percentage_text = f"{anomaly_percentage:.1f}%"
+                        except Exception:
+                            anomaly_percentage_text = "N/A"
+                    else:
+                        # For non-configured leads, show N/A for AI-specific metrics
+                        quality_score_text = "N/A"
+                        anomaly_percentage_text = "N/A"
 
                     lead_data.append([
                         lead_name,
                         config_status,
-                        f"{quality_score:.1f}/100",
-                        f"{anomaly_percentage}%"
+                        quality_score_text,
+                        anomaly_percentage_text
                     ])
 
                 lead_table = Table(lead_data, colWidths=[1.5*inch, 1.5*inch, 1.5*inch, 1.5*inch])
@@ -2792,19 +2842,24 @@ class RMSAIDashboard:
         with col3:
             # Accuracy calculation (AI vs Event Condition)
             if total_events > 0:
-                # Simple accuracy: count when AI verdict matches event condition
+                # Proper accuracy: count only exact matches (same as Event Summary logic)
                 matches = 0
+                valid_events = 0
                 for _, row in patient_events.iterrows():
                     ai_verdict = row['ai_verdict']
                     event_condition = row['event_condition']
 
-                    # Normalize for comparison
-                    if ai_verdict == 'Normal' and event_condition in ['Normal', 'Unknown']:
-                        matches += 1
-                    elif ai_verdict != 'Normal' and event_condition != 'Normal' and event_condition != 'Unknown':
+                    # Skip unknown ground truth from accuracy calculation
+                    if event_condition == 'Unknown':
+                        continue
+
+                    valid_events += 1
+
+                    # Use same logic as Event Summary comparison - only exact matches count
+                    if ai_verdict == event_condition:
                         matches += 1
 
-                accuracy = (matches / total_events) * 100
+                accuracy = (matches / valid_events) * 100 if valid_events > 0 else 0
                 st.metric("AI Accuracy", f"{accuracy:.1f}%")
             else:
                 st.metric("AI Accuracy", "N/A")
