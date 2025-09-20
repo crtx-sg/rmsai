@@ -928,8 +928,19 @@ class RMSAIDashboard:
                     st.error(f"Chunk {selected_chunk} not found in vector database")
                 elif response.status_code == 503:
                     st.error("Vector search service not available")
+                elif response.status_code == 500:
+                    try:
+                        error_detail = response.json().get('detail', 'Internal server error')
+                        st.error(f"Internal server error: {error_detail}")
+                        st.info("💡 Try refreshing the page or selecting a different chunk ID")
+                    except:
+                        st.error("Internal server error (500). Try refreshing the page or selecting a different chunk ID.")
                 else:
-                    st.error(f"Search failed with status {response.status_code}")
+                    try:
+                        error_detail = response.json().get('detail', f'Status {response.status_code}')
+                        st.error(f"Search failed: {error_detail}")
+                    except:
+                        st.error(f"Search failed with status {response.status_code}")
 
             except requests.exceptions.Timeout:
                 st.error("Search request timed out. The vector database may be busy.")
@@ -2972,8 +2983,10 @@ class RMSAIDashboard:
             event_condition = row['Event Condition']
             ai_verdict = row['AI Verdict']
 
-            # Handle percentage annotations (e.g., "Tachycardia (15%)")
-            ai_verdict_clean = ai_verdict.split(' (')[0] if '(' in ai_verdict else ai_verdict
+            # Handle percentage annotations (e.g., "Tachycardia (15%)") while preserving condition names like "(MIT-BIH)"
+            import re
+            # Remove only percentage annotations like (25%) at the end, but keep condition identifiers like (MIT-BIH)
+            ai_verdict_clean = re.sub(r' \(\d+%\)$', '', ai_verdict)
 
             if event_condition == 'Unknown':
                 return "🔍 Unknown GT"
