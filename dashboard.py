@@ -128,6 +128,79 @@ class RMSAIDashboard:
         unique_anomalies = list(set(unique_anomalies))  # Remove duplicates
         return ", ".join(sort_by_severity(unique_anomalies))
 
+    def calculate_performance_metrics(self, ai_predictions, ground_truth, positive_class='anomaly'):
+        """
+        Calculate Precision, Recall, F1 score for binary or multiclass classification
+
+        Args:
+            ai_predictions: List of AI predictions
+            ground_truth: List of ground truth labels
+            positive_class: Class to treat as positive for binary metrics ('anomaly' or specific condition)
+
+        Returns:
+            dict: Dictionary containing precision, recall, f1, accuracy, and detailed counts
+        """
+        if len(ai_predictions) != len(ground_truth):
+            return {'precision': 0, 'recall': 0, 'f1': 0, 'accuracy': 0, 'support': 0}
+
+        # Convert to binary classification if needed
+        if positive_class == 'anomaly':
+            # Binary: Normal vs Any Anomaly
+            ai_binary = ['anomaly' if pred != 'Normal' and pred != 'Unknown' else 'normal' for pred in ai_predictions]
+            gt_binary = ['anomaly' if gt != 'Normal' and gt != 'Unknown' else 'normal' for gt in ground_truth]
+        else:
+            # Specific condition vs everything else
+            ai_binary = [positive_class if pred == positive_class else 'other' for pred in ai_predictions]
+            gt_binary = [positive_class if gt == positive_class else 'other' for gt in ground_truth]
+            positive_class = positive_class  # Keep original for calculations
+
+        # Calculate confusion matrix components
+        tp = sum(1 for ai, gt in zip(ai_binary, gt_binary) if ai != 'normal' and ai != 'other' and gt != 'normal' and gt != 'other')
+        fp = sum(1 for ai, gt in zip(ai_binary, gt_binary) if ai != 'normal' and ai != 'other' and (gt == 'normal' or gt == 'other'))
+        fn = sum(1 for ai, gt in zip(ai_binary, gt_binary) if (ai == 'normal' or ai == 'other') and gt != 'normal' and gt != 'other')
+        tn = sum(1 for ai, gt in zip(ai_binary, gt_binary) if (ai == 'normal' or ai == 'other') and (gt == 'normal' or gt == 'other'))
+
+        # Calculate metrics
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+        f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+        accuracy = (tp + tn) / (tp + tn + fp + fn) if (tp + tn + fp + fn) > 0 else 0
+
+        return {
+            'precision': precision,
+            'recall': recall,
+            'f1': f1,
+            'accuracy': accuracy,
+            'support': tp + fn,  # Total positive cases
+            'tp': tp, 'fp': fp, 'fn': fn, 'tn': tn
+        }
+
+    def calculate_condition_specific_metrics(self, ai_predictions, ground_truth):
+        """
+        Calculate metrics for each specific condition
+
+        Returns:
+            dict: Metrics for each condition type
+        """
+        # Get unique conditions (excluding Normal/Unknown)
+        all_conditions = set(ground_truth + ai_predictions)
+        conditions = [c for c in all_conditions if c not in ['Normal', 'Unknown']]
+
+        results = {}
+
+        # Overall binary metrics (any anomaly vs normal)
+        results['Overall_Anomaly_Detection'] = self.calculate_performance_metrics(
+            ai_predictions, ground_truth, positive_class='anomaly'
+        )
+
+        # Condition-specific metrics
+        for condition in conditions:
+            results[condition] = self.calculate_performance_metrics(
+                ai_predictions, ground_truth, positive_class=condition
+            )
+
+        return results
+
     def initialize_session_state(self):
         """Initialize session state variables"""
         # Cache for expensive operations
@@ -367,6 +440,152 @@ class RMSAIDashboard:
                 This may indicate a system issue or unusual patient conditions.
             </div>
             """, unsafe_allow_html=True)
+
+        # System-wide Performance Metrics
+        self.render_system_performance_metrics(chunks_df)
+
+    def render_system_performance_metrics(self, chunks_df: pd.DataFrame):
+        """Render system-wide precision, recall, and F1 metrics"""
+        st.subheader("🎯 System-Wide Performance Metrics")
+
+        if len(chunks_df) == 0:
+            st.info("No data available for performance analysis")
+            return
+
+        # Get ground truth for all chunks
+        try:
+            ground_truth_conditions = self._get_ground_truth_conditions(chunks_df)
+
+            # Filter to events with known ground truth
+            valid_chunks = chunks_df[chunks_df['event_id'].isin(ground_truth_conditions.keys())].copy()
+
+            if len(valid_chunks) == 0:
+                st.info("No events with ground truth available for performance analysis")
+                return
+
+            # Group by event to get AI verdicts
+            events_grouped = valid_chunks.groupby('event_id', as_index=False).agg({
+                'anomaly_type': lambda x: [t for t in x if t and t != 'None' and pd.notna(t)],
+                'anomaly_status': lambda x: (x == 'anomaly').sum(),
+                'heart_rate': 'first'
+            })
+
+            # Calculate AI verdicts for each event
+            ai_predictions = []
+            ground_truth = []
+
+            for _, row in events_grouped.iterrows():
+                event_id = row['event_id']
+
+                # Get AI verdict using the same logic as Patient Analysis
+                ai_verdict = self.get_unified_ai_verdict(
+                    row['anomaly_type'],
+                    row['heart_rate'],
+                    row['anomaly_status']
+                )
+
+                # Get ground truth
+                gt_condition = ground_truth_conditions.get(event_id, 'Unknown')
+
+                # Only include events with known ground truth
+                if gt_condition != 'Unknown':
+                    ai_predictions.append(ai_verdict)
+                    ground_truth.append(gt_condition)
+
+            if len(ai_predictions) == 0:
+                st.info("No valid events for performance calculation")
+                return
+
+            # Calculate system-wide metrics
+            system_metrics = self.calculate_condition_specific_metrics(ai_predictions, ground_truth)
+
+            # Display overall system performance
+            overall = system_metrics['Overall_Anomaly_Detection']
+
+            perf_col1, perf_col2, perf_col3, perf_col4 = st.columns(4)
+
+            with perf_col1:
+                st.metric("System Precision", f"{overall['precision']*100:.1f}%",
+                         help="Overall reliability of anomaly predictions across all patients")
+
+            with perf_col2:
+                st.metric("System Recall", f"{overall['recall']*100:.1f}%",
+                         help="Overall sensitivity in detecting anomalies across all patients")
+
+            with perf_col3:
+                st.metric("System F1 Score", f"{overall['f1']*100:.1f}%",
+                         help="Balanced performance measure across all patients")
+
+            with perf_col4:
+                st.metric("Events Analyzed", f"{len(ai_predictions):,}",
+                         help="Total events with ground truth used for performance calculation")
+
+            # Detailed system performance breakdown
+            with st.expander("📊 Detailed System Performance Breakdown", expanded=False):
+                sys_col1, sys_col2 = st.columns(2)
+
+                with sys_col1:
+                    st.write("**System-Wide Confusion Matrix**")
+
+                    confusion_data = [
+                        ['', 'Predicted Normal', 'Predicted Anomaly', 'Total'],
+                        ['Actual Normal', f"{overall['tn']}", f"{overall['fp']}", f"{overall['tn'] + overall['fp']}"],
+                        ['Actual Anomaly', f"{overall['fn']}", f"{overall['tp']}", f"{overall['fn'] + overall['tp']}"],
+                        ['Total', f"{overall['tn'] + overall['fn']}", f"{overall['fp'] + overall['tp']}", f"{len(ai_predictions)}"]
+                    ]
+
+                    st.table(pd.DataFrame(confusion_data[1:], columns=confusion_data[0]))
+
+                with sys_col2:
+                    st.write("**Performance by Condition Type**")
+
+                    # Show performance for each condition
+                    condition_perf_data = []
+
+                    for condition, metrics in system_metrics.items():
+                        if condition != 'Overall_Anomaly_Detection' and metrics['support'] > 0:
+                            condition_perf_data.append({
+                                'Condition': condition,
+                                'Events': metrics['support'],
+                                'Precision': f"{metrics['precision']*100:.1f}%",
+                                'Recall': f"{metrics['recall']*100:.1f}%",
+                                'F1': f"{metrics['f1']*100:.1f}%"
+                            })
+
+                    if condition_perf_data:
+                        st.dataframe(pd.DataFrame(condition_perf_data), use_container_width=True)
+                    else:
+                        st.info("No specific conditions found for detailed analysis")
+
+                # Clinical insights
+                st.write("**Clinical Performance Insights:**")
+
+                if overall['precision'] > 0.8:
+                    precision_insight = "✅ High precision - Low false alarm rate"
+                elif overall['precision'] > 0.6:
+                    precision_insight = "⚠️ Moderate precision - Some false alarms expected"
+                else:
+                    precision_insight = "❌ Low precision - High false alarm rate may cause alert fatigue"
+
+                if overall['recall'] > 0.8:
+                    recall_insight = "✅ High recall - Most anomalies detected"
+                elif overall['recall'] > 0.6:
+                    recall_insight = "⚠️ Moderate recall - Some anomalies may be missed"
+                else:
+                    recall_insight = "❌ Low recall - Significant anomalies being missed"
+
+                st.write(f"• {precision_insight}")
+                st.write(f"• {recall_insight}")
+
+                if overall['f1'] > 0.8:
+                    st.success("🎯 Excellent overall performance - System is performing well clinically")
+                elif overall['f1'] > 0.6:
+                    st.warning("⚖️ Good overall performance - Consider threshold tuning for improvement")
+                else:
+                    st.error("🔧 Performance needs improvement - Review model parameters and thresholds")
+
+        except Exception as e:
+            st.error(f"Error calculating system performance metrics: {str(e)}")
 
     def render_anomaly_timeline(self, chunks_df: pd.DataFrame):
         """Render anomaly detection timeline with interactive features"""
@@ -2826,7 +3045,7 @@ class RMSAIDashboard:
         # Patient summary stats
         st.subheader(f"Patient {selected_patient} - Summary")
 
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3, col4, col5, col6 = st.columns(6)
 
         # Calculate patient-level stats
         patient_events = patient_data.groupby('event_id', as_index=False).agg({
@@ -2862,34 +3081,51 @@ class RMSAIDashboard:
             anomaly_events = (patient_events['ai_verdict'] != 'Normal').sum()
             st.metric("AI Detected Anomalies", f"{anomaly_events:,}")
 
-        with col3:
-            # Accuracy calculation (AI vs Event Condition)
-            if total_events > 0:
-                # Proper accuracy: count only exact matches (same as Event Summary logic)
-                matches = 0
-                valid_events = 0
-                for _, row in patient_events.iterrows():
-                    ai_verdict = row['ai_verdict']
-                    event_condition = row['event_condition']
+        # Calculate performance metrics for this patient
+        total_events = len(patient_events)
+        if total_events > 0:
+            # Get valid events (excluding Unknown ground truth)
+            valid_events = patient_events[patient_events['event_condition'] != 'Unknown']
 
-                    # Skip unknown ground truth from accuracy calculation
-                    if event_condition == 'Unknown':
-                        continue
+            if len(valid_events) > 0:
+                ai_predictions = valid_events['ai_verdict'].tolist()
+                ground_truth = valid_events['event_condition'].tolist()
 
-                    valid_events += 1
+                # Calculate overall anomaly detection metrics
+                overall_metrics = self.calculate_performance_metrics(ai_predictions, ground_truth, 'anomaly')
 
-                    # Use same logic as Event Summary comparison - only exact matches count
-                    if ai_verdict == event_condition:
-                        matches += 1
+                with col3:
+                    st.metric("AI Accuracy", f"{overall_metrics['accuracy']*100:.1f}%")
 
-                accuracy = (matches / valid_events) * 100 if valid_events > 0 else 0
-                st.metric("AI Accuracy", f"{accuracy:.1f}%")
+                with col4:
+                    st.metric("Precision", f"{overall_metrics['precision']*100:.1f}%",
+                             help="Of AI-detected anomalies, how many were actually anomalies?")
+
+                with col5:
+                    st.metric("Recall", f"{overall_metrics['recall']*100:.1f}%",
+                             help="Of actual anomalies, how many did AI detect?")
+
+                with col6:
+                    st.metric("F1 Score", f"{overall_metrics['f1']*100:.1f}%",
+                             help="Harmonic mean of Precision and Recall")
             else:
+                with col3:
+                    st.metric("AI Accuracy", "N/A")
+                with col4:
+                    st.metric("Precision", "N/A")
+                with col5:
+                    st.metric("Recall", "N/A")
+                with col6:
+                    st.metric("F1 Score", "N/A")
+        else:
+            with col3:
                 st.metric("AI Accuracy", "N/A")
-
-        with col4:
-            avg_error = patient_events['error_score'].mean()
-            st.metric("Avg Error Score", f"{avg_error:.4f}")
+            with col4:
+                st.metric("Precision", "N/A")
+            with col5:
+                st.metric("Recall", "N/A")
+            with col6:
+                st.metric("F1 Score", "N/A")
 
         # Event Summary Table (with HR-based AI verdicts)
         st.subheader("Event Summary - HR-Enhanced AI Verdicts")
@@ -3113,9 +3349,74 @@ class RMSAIDashboard:
             avg_chunks_per_event = total_chunks / total_events if total_events > 0 else 0
             st.metric("Avg Chunks/Event", f"{avg_chunks_per_event:.0f}")
 
+        # Detailed Performance Metrics
+        if len(patient_events) > 0:
+            valid_events = patient_events[patient_events['event_condition'] != 'Unknown']
+            if len(valid_events) > 0:
+                st.subheader("Detailed Performance Metrics")
+
+                ai_predictions = valid_events['ai_verdict'].tolist()
+                ground_truth = valid_events['event_condition'].tolist()
+
+                # Calculate condition-specific metrics
+                condition_metrics = self.calculate_condition_specific_metrics(ai_predictions, ground_truth)
+
+                # Display overall metrics with confusion matrix details
+                overall = condition_metrics['Overall_Anomaly_Detection']
+
+                perf_detail_col1, perf_detail_col2 = st.columns(2)
+
+                with perf_detail_col1:
+                    st.write("**Confusion Matrix & Overall Performance**")
+
+                    # Create confusion matrix visualization
+                    confusion_data = [
+                        ['', 'Predicted Normal', 'Predicted Anomaly'],
+                        ['Actual Normal', f"TN: {overall['tn']}", f"FP: {overall['fp']}"],
+                        ['Actual Anomaly', f"FN: {overall['fn']}", f"TP: {overall['tp']}"]
+                    ]
+
+                    st.table(pd.DataFrame(confusion_data[1:], columns=confusion_data[0]))
+
+                    st.write("**Metrics Explanation:**")
+                    st.write(f"• **True Positives (TP)**: {overall['tp']} - Anomalies correctly detected")
+                    st.write(f"• **False Positives (FP)**: {overall['fp']} - Normal events incorrectly flagged")
+                    st.write(f"• **False Negatives (FN)**: {overall['fn']} - Anomalies missed")
+                    st.write(f"• **True Negatives (TN)**: {overall['tn']} - Normal events correctly identified")
+
+                with perf_detail_col2:
+                    st.write("**Condition-Specific Performance**")
+
+                    # Show metrics for each specific condition
+                    condition_data = []
+
+                    for condition, metrics in condition_metrics.items():
+                        if condition != 'Overall_Anomaly_Detection' and metrics['support'] > 0:
+                            condition_data.append({
+                                'Condition': condition,
+                                'Precision': f"{metrics['precision']*100:.1f}%",
+                                'Recall': f"{metrics['recall']*100:.1f}%",
+                                'F1 Score': f"{metrics['f1']*100:.1f}%",
+                                'Support': metrics['support'],
+                                'TP': metrics['tp'],
+                                'FP': metrics['fp'],
+                                'FN': metrics['fn']
+                            })
+
+                    if condition_data:
+                        st.dataframe(pd.DataFrame(condition_data), use_container_width=True)
+
+                        st.write("**Clinical Interpretation:**")
+                        st.write("• **Precision**: How reliable are positive predictions?")
+                        st.write("• **Recall**: How many actual cases are caught?")
+                        st.write("• **F1 Score**: Balanced measure of both")
+                        st.write("• **Support**: Number of actual cases of this condition")
+                    else:
+                        st.info("No specific conditions with sufficient data for detailed analysis")
+
         # Comparison Summary Chart
         if len(patient_events) > 0:
-            st.subheader("AI Performance Summary")
+            st.subheader("AI Performance Visualization")
 
             comparison_counts = display_events['Comparison'].value_counts()
 

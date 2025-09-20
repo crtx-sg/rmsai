@@ -220,25 +220,27 @@ The RMSAI Enhanced ECG Anomaly Detection System follows a modular, real-time pro
 **File**: `dashboard.py`
 - **Framework**: Streamlit with interactive components
 - **Views**:
-  - **System Overview**: Real-time metrics and status
+  - **System Overview**: Real-time metrics, system-wide performance metrics, and status
   - **Timeline**: Interactive anomaly timeline with filters
   - **Conditions**: Condition-specific analysis and statistics
   - **Leads**: ECG lead analysis and comparison
   - **Similarity**: Pattern matching and similar case finding
-  - **👥 Patient Analysis**: Comprehensive patient-specific analysis and reporting
+  - **👥 Patient Analysis**: Comprehensive patient-specific analysis with clinical performance metrics
 - **Features**:
   - Auto-refresh capabilities (10s-60s intervals)
   - Data caching for performance
   - Export functionality (CSV, PDF)
   - Real-time API integration
   - Medical report generation with HDF5 integration
+  - **🎯 Clinical Performance Metrics**: Precision, Recall, F1-Score tracking
 
 #### 🏥 **Patient Analysis System**
 **Enhanced Features**:
 - **Patient-Specific Analysis**:
   - Event-by-event breakdown with AI vs Event Condition comparison
-  - Accuracy metrics and performance evaluation
-  - Comprehensive patient summary statistics
+  - **🎯 Clinical Performance Metrics**: Precision, Recall, F1-Score, and accuracy evaluation
+  - Comprehensive patient summary statistics with confusion matrix analysis
+  - **Condition-Specific Performance**: Individual metrics for V-Tac, A-Fib, Tachycardia, etc.
 - **Detailed Event Reports**:
   - **Information Section**: Device info, patient data, event metadata, data quality scores
   - **Diagnosis Section**: ECG lead configuration, vital signs analysis, waveform summaries
@@ -257,6 +259,88 @@ The RMSAI Enhanced ECG Anomaly Detection System follows a modular, real-time pro
   - API integration for ECG lead configuration
   - Device information and data quality scoring
   - Model version tracking and metadata persistence
+
+#### 🎯 **Clinical Performance Metrics System**
+
+The RMSAI system now includes comprehensive clinical performance evaluation metrics essential for medical AI validation and regulatory compliance.
+
+**📊 Performance Metrics Available:**
+
+- **Precision**: Reliability of AI anomaly predictions (reduces false alarms)
+  - Formula: `TP / (TP + FP)`
+  - Clinical Impact: High precision reduces alert fatigue for medical staff
+
+- **Recall (Sensitivity)**: Ability to detect actual anomalies (patient safety)
+  - Formula: `TP / (TP + FN)`
+  - Clinical Impact: High recall ensures critical conditions are not missed
+
+- **F1-Score**: Balanced performance measure
+  - Formula: `2 × (Precision × Recall) / (Precision + Recall)`
+  - Clinical Impact: Overall AI performance indicator
+
+- **Accuracy**: Overall correctness of predictions
+  - Formula: `(TP + TN) / (TP + TN + FP + FN)`
+  - Clinical Impact: General reliability measure
+
+**🏥 Implementation Levels:**
+
+1. **Patient-Level Analysis**:
+   ```
+   ┌─────────────────────────────────────────────────────────┐
+   │ Patient PT7206 Performance Summary                      │
+   ├─────────────────────────────────────────────────────────┤
+   │ Total Events: 8    │ AI Accuracy: 87.5%                │
+   │ AI Detected: 6     │ Precision: 83.3%                  │
+   │ Anomalies: 5       │ Recall: 100.0%                    │
+   │ Normal: 3          │ F1-Score: 90.9%                   │
+   └─────────────────────────────────────────────────────────┘
+   ```
+
+2. **System-Wide Analysis**:
+   ```
+   ┌─────────────────────────────────────────────────────────┐
+   │ System Performance (All Patients)                      │
+   ├─────────────────────────────────────────────────────────┤
+   │ System Precision: 78.6%  │ Events Analyzed: 24          │
+   │ System Recall: 91.7%     │ Clinical Insights:           │
+   │ System F1-Score: 84.6%   │ ✅ High recall - Most        │
+   │ Events Analyzed: 24       │    anomalies detected        │
+   └─────────────────────────────────────────────────────────┘
+   ```
+
+3. **Condition-Specific Performance**:
+   ```
+   ┌───────────────────────────────────────────────────────────┐
+   │ Condition                    │ Precision │ Recall │ F1    │
+   ├───────────────────────────────────────────────────────────┤
+   │ Ventricular Tachycardia      │   92.3%   │ 100.0% │ 96.0% │
+   │ Atrial Fibrillation          │   75.0%   │  85.7% │ 80.0% │
+   │ Tachycardia                  │   66.7%   │  80.0% │ 72.7% │
+   └───────────────────────────────────────────────────────────┘
+   ```
+
+**🔬 Clinical Insights & Automation:**
+
+- **Confusion Matrix Analysis**: Detailed TP/FP/FN/TN breakdown
+- **Clinical Interpretation**: Automated performance guidance
+  - `Precision > 80%`: ✅ Low false alarm rate
+  - `Recall > 80%`: ✅ Most anomalies detected
+  - `F1 > 80%`: 🎯 Excellent clinical performance
+
+**💡 Use Cases:**
+
+- **Model Validation**: Quantify AI performance vs cardiologist annotations
+- **Threshold Optimization**: Balance precision vs recall for clinical needs
+- **Regulatory Compliance**: Standard metrics for medical AI approval
+- **Quality Assurance**: Monitor AI performance over time
+- **Clinical Decision Support**: Help doctors understand AI reliability
+
+**🎛️ Dashboard Integration:**
+
+- **Patient Analysis**: Individual patient performance metrics
+- **System Overview**: Overall system performance tracking
+- **Expandable Details**: Confusion matrices and clinical insights
+- **Performance Trends**: Historical performance monitoring
 
 ### Deployment Architecture
 
@@ -2772,10 +2856,19 @@ This project is licensed under the MIT License. See LICENSE file for details.
 
 ---
 
-**RMSAI Enhanced ECG Anomaly Detection System v2.1**
-*Real-time ECG monitoring with configurable lead selection, advanced ML analytics, and adaptive intelligence*
+**RMSAI Enhanced ECG Anomaly Detection System v2.2**
+*Real-time ECG monitoring with clinical performance metrics, configurable lead selection, and advanced ML analytics*
 
-### 🆕 **Version 2.1 Highlights:**
+### 🆕 **Version 2.2 Highlights:**
+- **🎯 Clinical Performance Metrics**: Comprehensive Precision, Recall, F1-Score tracking
+  - Patient-level and system-wide performance analysis
+  - Condition-specific performance breakdown
+  - Clinical insights and automated performance guidance
+- **🏥 Medical AI Validation**: Standard metrics for regulatory compliance
+- **📊 Enhanced Dashboard**: Confusion matrix analysis and clinical interpretation
+- **🔧 Bug Fixes**: Fixed AI Accuracy comparison mismatch for identical conditions
+
+### **Version 2.1 Features:**
 - **Configurable Lead Selection**: Choose 1-7 ECG leads for optimal performance
 - **Performance Optimization**: Up to 85.7% processing time reduction
 - **Aligned Chunking Strategy**: 99.2% ECG coverage with 33 chunks per lead
