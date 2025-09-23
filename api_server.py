@@ -219,27 +219,37 @@ def get_processor_config():
         except Exception as e:
             logger.error(f"Error getting processor config: {e}")
 
-    # Fallback: get from database
+    # Fallback: use centralized config with database leads
     try:
+        from config import get_default_ecg_config, ECG_PROCESSING_CONFIG, get_performance_estimates
+
+        # Get available leads from database
         with get_db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT DISTINCT lead_name FROM chunks ORDER BY lead_name")
-            available_leads = [row[0] for row in cursor.fetchall()]
+            db_available_leads = [row[0] for row in cursor.fetchall()]
+
+        # Use centralized config with database leads if available
+        default_config = get_default_ecg_config()
+        available_leads = db_available_leads if db_available_leads else default_config['available_leads']
+        selected_leads = default_config['selected_leads']  # Use default selected leads from config
+
+        performance_estimates = get_performance_estimates(len(selected_leads))
+        performance_estimates.update({
+            'selected_leads': len(selected_leads),
+            'max_chunks_per_lead': ECG_PROCESSING_CONFIG['max_chunks_per_lead'],
+            'coverage_percentage': 99.2
+        })
 
         _processor_config = {
-            'selected_leads': available_leads,
+            'selected_leads': selected_leads,
             'available_leads': available_leads,
             'chunking_config': {
-                'chunk_size': 140,
-                'step_size': 70,
-                'max_chunks_per_lead': 33
+                'chunk_size': ECG_PROCESSING_CONFIG['chunk_size'],
+                'step_size': ECG_PROCESSING_CONFIG['step_size'],
+                'max_chunks_per_lead': ECG_PROCESSING_CONFIG['max_chunks_per_lead']
             },
-            'performance_estimates': {
-                'selected_leads': len(available_leads),
-                'max_chunks_per_lead': 33,
-                'chunks_per_event': len(available_leads) * 33,
-                'coverage_percentage': 99.2
-            }
+            'performance_estimates': performance_estimates
         }
         _config_cache_time = current_time
         return _processor_config
@@ -717,17 +727,28 @@ async def get_lead_configuration():
 async def update_lead_configuration(config_update: LeadConfigUpdate):
     """Update lead configuration (Note: requires processor restart to take effect)"""
     try:
-        # Validate leads exist in database
+        # Validate leads using centralized validation
+        from config import validate_ecg_leads
+
+        is_valid, invalid_leads = validate_ecg_leads(config_update.selected_leads)
+        if not is_valid:
+            from config import ALL_AVAILABLE_ECG_LEADS
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid leads: {invalid_leads}. Available leads: {ALL_AVAILABLE_ECG_LEADS}"
+            )
+
+        # Additional validation - check leads exist in database
         with get_db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT DISTINCT lead_name FROM chunks")
-            available_leads = [row[0] for row in cursor.fetchall()]
+            db_available_leads = [row[0] for row in cursor.fetchall()]
 
-        invalid_leads = [lead for lead in config_update.selected_leads if lead not in available_leads]
-        if invalid_leads:
+        missing_leads = [lead for lead in config_update.selected_leads if lead not in db_available_leads]
+        if missing_leads:
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid leads: {invalid_leads}. Available leads: {available_leads}"
+                detail=f"Selected leads not found in database: {missing_leads}. Database has: {db_available_leads}"
             )
 
         # Calculate performance impact
@@ -752,7 +773,7 @@ async def update_lead_configuration(config_update: LeadConfigUpdate):
             },
             "validation": {
                 "valid": True,
-                "available_leads": available_leads,
+                "available_leads": db_available_leads,
                 "invalid_leads": invalid_leads
             },
             "timestamp": datetime.now().isoformat()

@@ -87,11 +87,10 @@ class RMSAIConfig:
         self.n_features = 1
         self.embedding_dim = 128  # Match actual model output
 
-        # ECG leads configuration
-        #self.available_leads = ['ECG1', 'ECG2', 'ECG3', 'aVR', 'aVL', 'aVF', 'vVX']
-        self.available_leads = ['ECG2']
-        # Default to all leads, but can be configured to process subset
-        self.selected_leads = self.available_leads.copy()  # Process all by default
+        # ECG leads configuration - use centralized config
+        from config import ALL_AVAILABLE_ECG_LEADS, DEFAULT_SELECTED_ECG_LEADS
+        self.available_leads = ALL_AVAILABLE_ECG_LEADS.copy()
+        self.selected_leads = DEFAULT_SELECTED_ECG_LEADS.copy()
 
         # Model loading configuration
         self.model_loading_method = "auto"  # "auto", "method1", "method2", "method3"
@@ -130,8 +129,10 @@ class RMSAIConfig:
 
     def set_selected_leads(self, leads: List[str]):
         """Configure which ECG leads to process"""
-        invalid_leads = [lead for lead in leads if lead not in self.available_leads]
-        if invalid_leads:
+        from config import validate_ecg_leads
+
+        is_valid, invalid_leads = validate_ecg_leads(leads)
+        if not is_valid:
             raise ValueError(f"Invalid leads: {invalid_leads}. Available leads: {self.available_leads}")
 
         self.selected_leads = leads
@@ -139,12 +140,16 @@ class RMSAIConfig:
 
     def get_performance_estimate(self) -> Dict[str, int]:
         """Get performance estimates based on current configuration"""
-        chunks_per_event = len(self.selected_leads) * self.max_chunks_per_lead
+        from config import get_performance_estimates, ECG_PROCESSING_CONFIG
+
+        selected_count = len(self.selected_leads)
+        perf_estimates = get_performance_estimates(selected_count)
 
         return {
-            "selected_leads": len(self.selected_leads),
+            "selected_leads": selected_count,
             "max_chunks_per_lead": self.max_chunks_per_lead,
-            "chunks_per_event": chunks_per_event,
+            "chunks_per_event": perf_estimates['chunks_per_event'],
+            "performance_gain_percent": perf_estimates['performance_gain_percent'],
             "coverage_percentage": round(((self.max_chunks_per_lead - 1) * self.step_size + self.chunk_size) / self.ecg_samples_per_event * 100, 1)
         }
 
