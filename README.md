@@ -254,6 +254,15 @@ The RMSAI Enhanced ECG Anomaly Detection System follows a modular, real-time pro
   - HDF5 data extraction for event condition information
   - Vital signs with relative time differences from event
   - ECG lead quality assessment and AI configuration status
+- **🫀 Early Warning System (EWS) Integration**:
+  - **NEWS2-Based Scoring**: Implementation of National Early Warning Score 2 for vital signs assessment
+  - **Real-time Risk Assessment**: Automatic calculation of patient risk categories (Low, Medium, High)
+  - **Clinical Decision Support**: Monitoring frequency and clinical response recommendations
+  - **Configurable Scoring Templates**: EWS scoring rules defined in `config.py` for easy customization
+  - **Trend Analysis**: Linear regression-based trend detection for EWS score progression and vital sign patterns
+  - **Event-Specific Analysis**: EWS calculations displayed in View Event Report with detailed breakdowns
+  - **Visual EWS Template**: Reference scoring template display with vital sign ranges and corresponding scores
+  - **Integration with Vital Signs**: Seamless connection with HDF5 vital signs data and history
 - **Advanced Data Integration**:
   - Event condition extraction from HDF5 event attributes
   - API integration for ECG lead configuration
@@ -506,7 +515,8 @@ PatientID_YYYY-MM.h5
 │   ├── seconds_before_event      # 6.0 seconds
 │   ├── seconds_after_event       # 6.0 seconds
 │   ├── data_quality_score        # 0.85-0.98
-│   └── device_info               # "RMSAI-SimDevice-v1.0"
+│   ├── device_info               # "RMSAI-SimDevice-v1.0"
+│   └── max_vital_history         # 30 (number of historical samples per vital)
 ├── event_1001/                   # First alarm event
 │   ├── ecg/                      # ECG signal group (200 Hz)
 │   │   ├── ECG1                  # Lead I [2400 samples, gzip]
@@ -516,35 +526,194 @@ PatientID_YYYY-MM.h5
 │   │   ├── aVL                   # Augmented vector left [2400 samples, gzip]
 │   │   ├── aVF                   # Augmented vector foot [2400 samples, gzip]
 │   │   ├── vVX                   # Chest lead [2400 samples, gzip]
-│   │   ├── pacer_info            # Pacer information (4-byte integer)
-│   │   └── pacer_offset          # Pacer spike offset (sample number)
+│   │   └── extras                # JSON: {"pacer_info": int, "pacer_offset": int, ...}
 │   ├── ppg/                      # PPG signal group (75 Hz)
-│   │   └── PPG                   # Photoplethysmogram [900 samples, gzip]
+│   │   ├── PPG                   # Photoplethysmogram [900 samples, gzip]
+│   │   └── extras                # JSON: {} (user extensible)
 │   ├── resp/                     # Respiratory signal group (33.33 Hz)
-│   │   └── RESP                  # Respiratory waveform [400 samples, gzip]
+│   │   ├── RESP                  # Respiratory waveform [400 samples, gzip]
+│   │   └── extras                # JSON: {} (user extensible)
 │   ├── vitals/                   # Single vital measurements
 │   │   ├── HR/                   # Heart rate group
 │   │   │   ├── value             # Heart rate value (int)
 │   │   │   ├── units             # "bpm"
 │   │   │   ├── timestamp         # Measurement epoch timestamp
-│   │   │   ├── upper_threshold   # Upper limit (int)
-│   │   │   └── lower_threshold   # Lower limit (int)
-│   │   ├── Pulse/                # Pulse rate group (with thresholds)
-│   │   ├── SpO2/                 # Oxygen saturation group (with thresholds)
-│   │   ├── Systolic/             # Systolic BP group (with thresholds)
-│   │   ├── Diastolic/            # Diastolic BP group (with thresholds)
-│   │   ├── RespRate/             # Respiratory rate group (with thresholds)
-│   │   ├── Temp/                 # Temperature group (with thresholds)
+│   │   │   └── extras            # JSON: {"upper_threshold": int, "lower_threshold": int, ...}
+│   │   ├── Pulse/                # Pulse rate group
+│   │   │   ├── value, units, timestamp
+│   │   │   └── extras            # JSON: {"upper_threshold": int, "lower_threshold": int, ...}
+│   │   ├── SpO2/                 # Oxygen saturation group
+│   │   │   ├── value, units, timestamp
+│   │   │   └── extras            # JSON: {"upper_threshold": int, "lower_threshold": int, ...}
+│   │   ├── Systolic/             # Systolic BP group
+│   │   │   ├── value, units, timestamp
+│   │   │   └── extras            # JSON: {"upper_threshold": int, "lower_threshold": int, ...}
+│   │   ├── Diastolic/            # Diastolic BP group
+│   │   │   ├── value, units, timestamp
+│   │   │   └── extras            # JSON: {"upper_threshold": int, "lower_threshold": int, ...}
+│   │   ├── RespRate/             # Respiratory rate group
+│   │   │   ├── value, units, timestamp
+│   │   │   └── extras            # JSON: {"upper_threshold": int, "lower_threshold": int, ...}
+│   │   ├── Temp/                 # Temperature group
+│   │   │   ├── value, units, timestamp
+│   │   │   └── extras            # JSON: {"upper_threshold": int, "lower_threshold": int, ...}
 │   │   └── XL_Posture/           # Posture group
 │   │       ├── value             # Posture angle value (int)
 │   │       ├── units             # "degrees"
 │   │       ├── timestamp         # Measurement epoch timestamp
-│   │       ├── step_count        # Total steps (int)
-│   │       └── time_since_posture_change  # Seconds (int)
+│   │       └── extras            # JSON: {"step_count": int, "time_since_posture_change": int, ...}
 │   ├── timestamp                 # Event epoch timestamp
 │   └── uuid                      # Unique event identifier
 ├── event_1002/                   # Subsequent events...
 └── event_100N/
+```
+
+## 🆕 Extras JSON Extension System
+
+The HDF5 structure now includes a flexible `extras` JSON element in each signal group and vital measurement that allows for custom data extensions while maintaining backward compatibility.
+
+### ECG Extras
+```json
+{
+  "pacer_info": 12345,     // 4-byte integer with bit-packed pacer data
+  "pacer_offset": 1200,    // Sample number (0-2399) for pacer spike location
+  "custom_field": "value"  // Users can add any custom data here
+}
+```
+
+**Pacer Info Bit Encoding (32-bit integer):**
+- **Bits 0-7**: Pacer type (0=None, 1=Single, 2=Dual, 3=Biventricular)
+- **Bits 8-15**: Pacer rate (bpm, if applicable)
+- **Bits 16-23**: Pacer amplitude (arbitrary units)
+- **Bits 24-31**: Status flags
+
+### PPG & Respiratory Extras
+```json
+{
+  // Empty by default - users can add custom data
+  "signal_quality": 0.95,
+  "processing_notes": "filtered",
+  "custom_metadata": {}
+}
+```
+
+### Vital Signs Extras
+For standard vitals (HR, Pulse, SpO2, Systolic, Diastolic, RespRate, Temp):
+```json
+{
+  "upper_threshold": 100,
+  "lower_threshold": 60,
+  "history": [
+    {"value": 98, "timestamp": 1704067200.5},
+    {"value": 95, "timestamp": 1704067320.1},
+    {"value": 102, "timestamp": 1704067440.8},
+    "... (up to max_vital_history samples)"
+  ],
+  "alarm_enabled": true,
+  "custom_limits": {"warning": 85, "critical": 110}
+}
+```
+
+For XL_Posture vital:
+```json
+{
+  "step_count": 5432,
+  "time_since_posture_change": 3600,
+  "history": [
+    {"value": 15, "timestamp": 1704067200.5},
+    {"value": 18, "timestamp": 1704067230.2},
+    {"value": 12, "timestamp": 1704067260.1},
+    "... (up to max_vital_history samples)"
+  ],
+  "activity_level": "moderate",
+  "custom_motion_data": {}
+}
+```
+
+### Accessing Extras Data
+
+```python
+import h5py
+import json
+
+# Read extras from ECG
+with h5py.File('patient_data.h5', 'r') as f:
+    event = f['event_1001']
+
+    # ECG extras (pacer info)
+    ecg_extras = json.loads(event['ecg']['extras'][()].decode('utf-8'))
+    pacer_info = ecg_extras.get('pacer_info', 0)
+    pacer_offset = ecg_extras.get('pacer_offset', 0)
+
+    # Vital extras (thresholds)
+    hr_extras = json.loads(event['vitals']['HR']['extras'][()].decode('utf-8'))
+    upper_threshold = hr_extras.get('upper_threshold', 100)
+    lower_threshold = hr_extras.get('lower_threshold', 60)
+
+    # XL_Posture extras
+    posture_extras = json.loads(event['vitals']['XL_Posture']['extras'][()].decode('utf-8'))
+    step_count = posture_extras.get('step_count', 0)
+    time_since_change = posture_extras.get('time_since_posture_change', 0)
+
+    # Access historical data
+    hr_history = hr_extras.get('history', [])
+    print(f"HR history: {len(hr_history)} samples")
+    if hr_history:
+        latest_historical = hr_history[-1]
+        oldest_historical = hr_history[0]
+        print(f"  Latest historical HR: {latest_historical['value']} at {latest_historical['timestamp']}")
+        print(f"  Oldest historical HR: {oldest_historical['value']} at {oldest_historical['timestamp']}")
+
+    # Get max history size from metadata
+    max_history = f['metadata']['max_vital_history'][()]
+    print(f"Max vital history configured: {max_history} samples")
+```
+
+### Historical Data Features
+
+Each vital sign includes a `history` array in its extras JSON containing past measurements:
+
+**History Structure:**
+- **Array Length**: Controlled by `metadata/max_vital_history` (default: 30 samples)
+- **Sample Format**: `{"value": number, "timestamp": epoch_seconds}`
+- **Time Ordering**: Oldest first, newest last
+- **Realistic Intervals**: Each vital type uses medically appropriate measurement intervals
+- **Condition-Based Trends**: History reflects gradual development of medical conditions
+- **Value Bounds**: All historical values stay within medically realistic ranges
+
+**Measurement Intervals by Vital Type:**
+- **HR/Pulse**: 1-5 minutes between measurements
+- **SpO2**: 30 seconds to 3 minutes (more frequent monitoring)
+- **Blood Pressure**: 5-30 minutes between measurements
+- **Respiratory Rate**: 2-10 minutes between measurements
+- **Temperature**: 30 minutes to 1 hour (less frequent)
+- **Posture**: 10 seconds to 1 minute (frequent activity monitoring)
+
+### Extending with Custom Data
+
+Users can easily add custom data to any extras field:
+
+```python
+# Add custom data to ECG extras
+ecg_extras = {
+    "pacer_info": 12345,
+    "pacer_offset": 1200,
+    "custom_analysis": {
+        "qrs_width": 0.08,
+        "pr_interval": 0.16,
+        "qt_interval": 0.42
+    },
+    "processing_flags": ["filtered", "baseline_corrected"]
+}
+
+# Add custom data to vital extras
+hr_extras = {
+    "upper_threshold": 100,
+    "lower_threshold": 60,
+    "confidence_level": 0.95,
+    "measurement_method": "ECG_derived",
+    "quality_score": 0.88
+}
 ```
 
 ### Clinical Conditions & Distribution
@@ -1489,6 +1658,10 @@ python tests/test_dashboard_data.py
 python tests/test_dashboard_simple.py
 python tests/test_anomaly_alert.py
 
+# Test EWS (Early Warning System) functionality
+python tests/test_ews_config.py
+python -m pytest tests/test_ews_config.py -v
+
 # Verbose output
 python tests/test_improvements.py --verbose
 ```
@@ -1502,6 +1675,7 @@ The test suite validates:
 - ✅ **Pacer Functionality**: HDF5 pacer data processing and analysis
 - ✅ **LSTM Processor**: 100% coverage chunking, model inference, database integration
 - ✅ **Analysis Tools**: Condition comparison, coverage optimization, chunking analysis
+- ✅ **🫀 EWS (Early Warning System)**: NEWS2-based scoring, risk categorization, linear regression trend analysis (14 test cases)
 - ✅ **Integration**: Component interaction and data flow
 
 #### Test Coverage
@@ -2193,6 +2367,97 @@ conditions = ['Tachycardia', 'Ventricular Tachycardia (MIT-BIH)', 'Bradycardia']
 sorted_conditions = sort_by_severity(conditions)
 # Returns: ['Ventricular Tachycardia (MIT-BIH)', 'Tachycardia', 'Bradycardia']
 ```
+
+### 🫀 Early Warning System (EWS) Configuration
+
+The RMSAI system includes comprehensive EWS (Early Warning System) configuration based on the NEWS2 (National Early Warning Score 2) standard for clinical vital signs assessment.
+
+#### EWS Configuration Functions
+
+```python
+from config import (
+    get_ews_scoring_template,
+    get_ews_risk_categories,
+    get_ews_score_for_vital,
+    get_ews_risk_category
+)
+
+# Get the complete EWS scoring template
+ews_template = get_ews_scoring_template()
+
+# Get risk category definitions
+risk_categories = get_ews_risk_categories()
+
+# Calculate EWS score for specific vital sign
+heart_rate_score = get_ews_score_for_vital('heart_rate', 120)  # Returns 2
+temp_score = get_ews_score_for_vital('temperature', 39.5)      # Returns 2
+
+# Get risk category for total EWS score
+risk_info = get_ews_risk_category(8)  # Returns High Risk information
+print(f"Risk Level: {risk_info['category']}")           # High Risk
+print(f"Clinical Response: {risk_info['clinical_response']}")  # Urgent medical review required
+```
+
+#### EWS Scoring Template Structure
+
+The EWS scoring template in `config.py` defines scoring rules for vital signs:
+
+```python
+EWS_SCORING_TEMPLATE = {
+    'heart_rate': {
+        'ranges': [
+            {'range': '≤40', 'score': 3, 'min': 0, 'max': 40},
+            {'range': '41-50', 'score': 1, 'min': 41, 'max': 50},
+            {'range': '51-90', 'score': 0, 'min': 51, 'max': 90},
+            {'range': '91-110', 'score': 1, 'min': 91, 'max': 110},
+            {'range': '111-130', 'score': 2, 'min': 111, 'max': 130},
+            {'range': '≥131', 'score': 3, 'min': 131, 'max': 999}
+        ],
+        'units': 'bpm',
+        'display_name': 'Heart Rate'
+    },
+    # ... other vital signs (respiratory_rate, systolic_bp, temperature, oxygen_saturation, consciousness)
+}
+```
+
+#### Risk Categories Configuration
+
+EWS risk categories define clinical responses based on total scores:
+
+```python
+EWS_RISK_CATEGORIES = {
+    'low': {
+        'score_range': (0, 4),
+        'category': 'Low Risk',
+        'color': '#28a745',  # Green
+        'monitoring_frequency': 'every 12 hours',
+        'clinical_response': 'Continue routine monitoring'
+    },
+    'medium': {
+        'score_range': (5, 6),
+        'category': 'Medium Risk',
+        'color': '#ffc107',  # Yellow/Orange
+        'monitoring_frequency': 'every 4-6 hours',
+        'clinical_response': 'Increase monitoring frequency and consider medical review'
+    },
+    'high': {
+        'score_range': (7, float('inf')),
+        'category': 'High Risk',
+        'color': '#dc3545',  # Red
+        'monitoring_frequency': 'continuous or every hour',
+        'clinical_response': 'Urgent medical review required and consider intensive monitoring'
+    }
+}
+```
+
+#### EWS Integration with Vital Signs Analysis
+
+The EWS system seamlessly integrates with the RMSAI vital signs analysis pipeline:
+
+1. **Automatic EWS Calculation**: Every View Event Report automatically calculates EWS scores
+2. **Historical Trend Analysis**: Uses linear regression for trend detection across vital signs and EWS progression
+3. **Clinical Decision Support**: Provides monitoring frequency and clinical response recommendations
+4. **Visual Template Reference**: Expandable EWS scoring template reference in reports
 
 ### Dynamic Configuration Updates
 

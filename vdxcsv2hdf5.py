@@ -1,13 +1,15 @@
 # This program converts the Vios vdx csv file to hdf5 file format
+# Enhanced for RMSAI EWS (Early Warning System) compatibility
 # ganesh
 import pandas as pd
 import h5py
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
 import uuid
 import sys
 import json
 import os
+import random
 
 # --- JSON Serialization Helper ---
 class NumpyEncoder(json.JSONEncoder):
@@ -35,10 +37,96 @@ def convert_numpy_types(obj):
         return [convert_numpy_types(item) for item in obj]
     return obj
 
+def generate_vital_history(vital_name, current_value, current_timestamp, num_samples=20):
+    """
+    Generate realistic historical vital signs data for EWS trend analysis
+
+    Args:
+        vital_name: Name of the vital sign
+        current_value: Current vital sign value
+        current_timestamp: Current timestamp (epoch)
+        num_samples: Number of historical samples to generate
+
+    Returns:
+        List of historical data points with timestamp, value
+    """
+    history = []
+
+    # Define realistic variation ranges for different vitals
+    variation_ranges = {
+        'HR': {'min_change': -15, 'max_change': 20, 'volatility': 5},
+        'Pulse': {'min_change': -15, 'max_change': 20, 'volatility': 5},
+        'RespRate': {'min_change': -5, 'max_change': 8, 'volatility': 2},
+        'SpO2': {'min_change': -8, 'max_change': 3, 'volatility': 2},
+        'Systolic': {'min_change': -20, 'max_change': 25, 'volatility': 8},
+        'Diastolic': {'min_change': -15, 'max_change': 20, 'volatility': 6},
+        'Temp': {'min_change': -3.0, 'max_change': 4.0, 'volatility': 1.0},
+        'XL_Posture': {'min_change': -30, 'max_change': 30, 'volatility': 10}
+    }
+
+    # Get variation parameters for this vital
+    params = variation_ranges.get(vital_name, {'min_change': -10, 'max_change': 10, 'volatility': 3})
+
+    # Generate time intervals (15-30 minutes apart, going backwards from current time)
+    base_timestamp = current_timestamp
+
+    for i in range(num_samples):
+        # Time going backward (15-30 minutes intervals)
+        time_offset = random.randint(900, 1800) * (i + 1)  # 15-30 minutes in seconds
+        hist_timestamp = base_timestamp - time_offset
+
+        # Generate realistic value variation
+        if i == 0:
+            # First historical point (closest to current) - small variation
+            variation = random.uniform(-params['volatility'], params['volatility'])
+        else:
+            # More variation for older data, with some trend
+            base_variation = random.uniform(params['min_change'], params['max_change'])
+            noise = random.uniform(-params['volatility'], params['volatility'])
+            variation = (base_variation * 0.1 * i) + noise
+
+        hist_value = current_value + variation
+
+        # Apply reasonable bounds for different vitals
+        if vital_name in ['HR', 'Pulse']:
+            hist_value = max(30, min(200, hist_value))
+        elif vital_name == 'RespRate':
+            hist_value = max(8, min(40, hist_value))
+        elif vital_name == 'SpO2':
+            hist_value = max(70, min(100, hist_value))
+        elif vital_name == 'Systolic':
+            hist_value = max(60, min(250, hist_value))
+        elif vital_name == 'Diastolic':
+            hist_value = max(40, min(150, hist_value))
+        elif vital_name == 'Temp':
+            hist_value = max(95.0, min(110.0, hist_value))
+
+        history.append({
+            'timestamp': int(hist_timestamp),
+            'value': round(float(hist_value), 2) if vital_name == 'Temp' else int(hist_value)
+        })
+
+    # Sort by timestamp (oldest first)
+    history.sort(key=lambda x: x['timestamp'])
+
+    return history
+
 # --- Main Conversion Logic ---
-def convert_csv_to_hdf5(csv_path):
+def convert_csv_to_hdf5(csv_path, enable_ews=True, history_samples=20):
     """
     Converts physiological data from a CSV file to a structured HDF5 file.
+
+    Args:
+        csv_path (str): Path to the input CSV file
+        enable_ews (bool): Enable EWS enhancements (default: True)
+        history_samples (int): Number of historical samples to generate (default: 20)
+
+    Enhanced for RMSAI EWS (Early Warning System) compatibility:
+    - Adds historical vital signs data for trend analysis
+    - Includes extras JSON field with generated history
+    - Compatible with NEWS2-based EWS scoring
+    - Supports linear regression trend detection
+    - Enables dashboard visualization and clinical decision support
     """
     print(f"Starting conversion of '{csv_path}'...")
 
@@ -60,7 +148,7 @@ def convert_csv_to_hdf5(csv_path):
         with h5py.File(hdf5_path, 'w') as hf:
             print(f"HDF5 file '{hdf5_path}' created.")
 
-            # --- Metadata Group ---
+            # --- Enhanced Metadata Group ---
             metadata = hf.create_group('metadata')
             metadata.create_dataset('patient_id', data=str(patient_id))
             metadata.create_dataset('sampling_rate_ecg', data=200.0)
@@ -71,8 +159,15 @@ def convert_csv_to_hdf5(csv_path):
             metadata.create_dataset('seconds_before_event', data=6.0)
             metadata.create_dataset('seconds_after_event', data=6.0)
             metadata.create_dataset('data_quality_score', data=0.95)
-            metadata.create_dataset('device_info', data="RMSAI-SimDevice-v1.0")
-            print("Metadata group created with JSON-serializable types.")
+            metadata.create_dataset('device_info', data="RMSAI-VDX-Converter-v2.0")
+
+            # EWS-specific metadata
+            metadata.create_dataset('max_vital_history', data=history_samples)  # EWS trend analysis history length
+            metadata.create_dataset('ews_enabled', data=1 if enable_ews else 0)  # Flag for EWS compatibility
+            metadata.create_dataset('converter_version', data="2.0.0")
+            metadata.create_dataset('conversion_timestamp', data=convert_numpy_types(int(datetime.now().timestamp())))
+
+            print("Enhanced metadata group created with EWS compatibility.")
 
             # --- Event Group ---
             event_group = hf.create_group('event_001')
@@ -144,6 +239,18 @@ def convert_csv_to_hdf5(csv_path):
 
                 vital_subgroup.create_dataset('lower_threshold', data=convert_numpy_types(low_thresh))
                 vital_subgroup.create_dataset('upper_threshold', data=convert_numpy_types(high_thresh))
+
+                # --- EWS Enhancement: Add historical data in extras ---
+                if enable_ews and value > 0:  # Only generate history if we have a valid current value
+                    history = generate_vital_history(vital_name, value, timestamp, num_samples=history_samples)
+                    extras_data = {
+                        'history': history,
+                        'generated_by': 'vdxcsv2hdf5_v2.0',
+                        'generated_timestamp': int(datetime.now().timestamp()),
+                        'trend_analysis_enabled': True
+                    }
+                    extras_json = json.dumps(extras_data, cls=NumpyEncoder)
+                    vital_subgroup.create_dataset('extras', data=extras_json)
             print("Standard vitals data processed.")
 
             # --- XL_Posture Group ---
@@ -171,9 +278,27 @@ def convert_csv_to_hdf5(csv_path):
             posture_group.create_dataset('timestamp', data=convert_numpy_types(posture_time))
             posture_group.create_dataset('step_count', data=convert_numpy_types(step_val))
             posture_group.create_dataset('time_since_posture_change', data=convert_numpy_types(time_change_val))
-            print("XL_Posture vital processed and stored.")
 
-        print(f"\nConversion successful. HDF5 file saved as '{hdf5_path}'.")
+            # --- EWS Enhancement: Add historical data for posture ---
+            if enable_ews and posture_val > 0:  # Only generate history if we have a valid posture value
+                posture_history = generate_vital_history('XL_Posture', posture_val, posture_time, num_samples=min(15, history_samples))
+                posture_extras_data = {
+                    'history': posture_history,
+                    'generated_by': 'vdxcsv2hdf5_v2.0',
+                    'generated_timestamp': int(datetime.now().timestamp()),
+                    'trend_analysis_enabled': True,
+                    'step_count': step_val,
+                    'time_since_change': time_change_val
+                }
+                posture_extras_json = json.dumps(posture_extras_data, cls=NumpyEncoder)
+                posture_group.create_dataset('extras', data=posture_extras_json)
+
+            print("Enhanced XL_Posture vital processed with EWS compatibility.")
+
+        print(f"\n🎉 EWS-Enhanced conversion successful!")
+        print(f"📁 HDF5 file saved as: '{hdf5_path}'")
+        print(f"🫀 EWS features: Historical vital signs data included for trend analysis")
+        print(f"📊 Compatible with RMSAI EWS analysis and dashboard reporting")
 
     except FileNotFoundError:
         print(f"Error: The file '{csv_path}' was not found.")
@@ -185,7 +310,33 @@ def convert_csv_to_hdf5(csv_path):
 # --- Execute the Conversion ---
 if __name__ == '__main__':
     if len(sys.argv) < 2:
-        print("Usage: python vdx2hdf5.py <path_to_csv_file>")
+        print("Usage: python vdxcsv2hdf5.py <path_to_csv_file> [--no-ews] [--history-samples N]")
+        print("")
+        print("Options:")
+        print("  --no-ews           Disable EWS enhancements (no historical data)")
+        print("  --history-samples  Number of historical samples to generate (default: 20)")
+        print("")
+        print("Examples:")
+        print("  python vdxcsv2hdf5.py data.csv")
+        print("  python vdxcsv2hdf5.py data.csv --history-samples 30")
+        print("  python vdxcsv2hdf5.py data.csv --no-ews")
     else:
         csv_file_path = sys.argv[1]
-        convert_csv_to_hdf5(csv_file_path)
+        enable_ews = True
+        history_samples = 20
+
+        # Parse additional arguments
+        for i in range(2, len(sys.argv)):
+            if sys.argv[i] == '--no-ews':
+                enable_ews = False
+            elif sys.argv[i] == '--history-samples' and i + 1 < len(sys.argv):
+                try:
+                    history_samples = int(sys.argv[i + 1])
+                    if history_samples < 1 or history_samples > 100:
+                        raise ValueError("History samples must be between 1 and 100")
+                except ValueError as e:
+                    print(f"Error: Invalid history samples value - {e}")
+                    sys.exit(1)
+
+        print(f"🔧 Configuration: EWS={'Enabled' if enable_ews else 'Disabled'}, History Samples={history_samples}")
+        convert_csv_to_hdf5(csv_file_path, enable_ews=enable_ews, history_samples=history_samples)

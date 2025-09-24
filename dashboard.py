@@ -2103,7 +2103,7 @@ class RMSAIDashboard:
         # Vital Signs DataFrame
         vitals = report_data.get('vitals', {})
         if vitals:
-            st.markdown("**Vital Signs Analysis:**")
+            st.markdown("**Basic Vital Signs Data:**")
             vitals_rows = []
 
             # Get event timestamp for relative time calculation
@@ -2290,7 +2290,11 @@ class RMSAIDashboard:
             processing_df = pd.DataFrame(processing_rows)
             st.dataframe(processing_df, use_container_width=True, hide_index=True)
 
-        # Export and Navigation Section
+        # === VITALS SIGNS ANALYSIS SECTION ===
+        st.markdown("---")
+        self.render_vitals_analysis_for_report(patient_id, event_id)
+
+        # Export and Navigation Section (moved to end)
         st.divider()
         col1, col2, col3 = st.columns([1, 1, 2])
 
@@ -2480,6 +2484,175 @@ class RMSAIDashboard:
             except Exception as e:
                 story.append(Paragraph(f"Note: Patient analysis data not available: {e}", styles['Normal']))
                 story.append(Spacer(1, 12))
+
+            # === VITALS ANALYSIS SECTION ===
+            try:
+                story.append(PageBreak())
+                story.append(Paragraph("Vital Signs Analysis", heading_style))
+                story.append(Spacer(1, 12))
+
+                # Try to perform vitals analysis
+                from rmsai_vitals_analysis import RMSAIVitalsAnalyzer
+
+                # Find HDF5 file containing this event
+                data_dir = "data"
+                if os.path.exists(data_dir):
+                    hdf5_files = [f for f in os.listdir(data_dir) if f.endswith('.h5')]
+                    target_hdf5 = None
+
+                    for hdf5_file in hdf5_files:
+                        hdf5_path = os.path.join(data_dir, hdf5_file)
+                        try:
+                            with h5py.File(hdf5_path, 'r') as f:
+                                if event_id in f:
+                                    target_hdf5 = hdf5_path
+                                    break
+                        except:
+                            continue
+
+                    if target_hdf5:
+                        # Initialize analyzer and extract data
+                        analyzer = RMSAIVitalsAnalyzer()
+                        vitals_data = analyzer.extract_vitals_history_from_hdf5(target_hdf5, event_id)
+                        analysis_results = analyzer.analyze_vital_trends(vitals_data)
+
+                        # Current EWS Status
+                        current_ews = analysis_results['current_ews']
+                        story.append(Paragraph("Early Warning System (EWS) Assessment", subheading_style))
+
+                        ews_data = [
+                            ['Parameter', 'Value'],
+                            ['EWS Score', str(current_ews['total_score'])],
+                            ['Risk Category', current_ews['risk_category']],
+                            ['Clinical Response', current_ews['clinical_response']]
+                        ]
+
+                        # Add trend if available
+                        ews_trend = analysis_results.get('ews_trend_analysis')
+                        if ews_trend:
+                            ews_data.append(['Overall Trend', f"{ews_trend['overall_trend'].title()} (Confidence: {ews_trend['confidence']})"])
+                            ews_data.append(['Clinical Interpretation', ews_trend['clinical_interpretation']])
+
+                        ews_table = Table(ews_data, colWidths=[2*inch, 4*inch])
+                        ews_table.setStyle(TableStyle([
+                            ('BACKGROUND', (0, 0), (-1, 0), colors.darkblue),
+                            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                            ('FONTSIZE', (0, 0), (-1, 0), 10),
+                            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                            ('BACKGROUND', (0, 1), (-1, -1), colors.lightblue),
+                            ('GRID', (0, 0), (-1, -1), 1, colors.black)
+                        ]))
+
+                        story.append(ews_table)
+                        story.append(Spacer(1, 12))
+
+                        # EWS Score Breakdown
+                        story.append(Paragraph("EWS Score Breakdown", subheading_style))
+                        breakdown_data = [['Vital Sign', 'Value', 'EWS Points', 'Notes']]
+
+                        for vital_name, vital_info in current_ews['score_breakdown'].items():
+                            breakdown_data.append([
+                                vital_name,
+                                str(vital_info.get('value', 'N/A')),
+                                str(vital_info.get('score', 0)),
+                                vital_info.get('note', '')
+                            ])
+
+                        breakdown_table = Table(breakdown_data, colWidths=[1.5*inch, 1*inch, 1*inch, 2.5*inch])
+                        breakdown_table.setStyle(TableStyle([
+                            ('BACKGROUND', (0, 0), (-1, 0), colors.darkgreen),
+                            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                            ('FONTSIZE', (0, 0), (-1, 0), 9),
+                            ('BACKGROUND', (0, 1), (-1, -1), colors.lightgreen),
+                            ('GRID', (0, 0), (-1, -1), 1, colors.black)
+                        ]))
+
+                        story.append(breakdown_table)
+                        story.append(Spacer(1, 12))
+
+                        # Clinical Summary
+                        clinical_summary = analyzer.generate_clinical_summary(analysis_results)
+
+                        story.append(Paragraph("Clinical Assessment Summary", subheading_style))
+                        clinical_data = [
+                            ['Assessment Area', 'Findings'],
+                            ['Monitoring Frequency', clinical_summary['monitoring_frequency'].title()],
+                        ]
+
+                        if clinical_summary.get('recommendations'):
+                            recommendations_text = '\n'.join([f"• {rec}" for rec in clinical_summary['recommendations']])
+                            clinical_data.append(['Recommendations', recommendations_text])
+
+                        if clinical_summary.get('individual_vital_alerts'):
+                            alerts_text = '\n'.join([f"• {alert['vital']}: {alert['trend']} - {alert['interpretation']}"
+                                                   for alert in clinical_summary['individual_vital_alerts']])
+                            clinical_data.append(['Vital Sign Alerts', alerts_text])
+
+                        clinical_table = Table(clinical_data, colWidths=[1.5*inch, 4.5*inch])
+                        clinical_table.setStyle(TableStyle([
+                            ('BACKGROUND', (0, 0), (-1, 0), colors.darkorange),
+                            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                            ('FONTSIZE', (0, 0), (-1, 0), 9),
+                            ('BACKGROUND', (0, 1), (-1, -1), colors.moccasin),
+                            ('GRID', (0, 0), (-1, -1), 1, colors.black)
+                        ]))
+
+                        story.append(clinical_table)
+                        story.append(Spacer(1, 12))
+
+                        # Individual Vitals History Summary
+                        story.append(Paragraph("Vital Signs History Summary", subheading_style))
+
+                        vitals_history_data = [['Vital Sign', 'Current Value', 'Trend Analysis', 'History Points']]
+
+                        individual_vitals = analysis_results.get('individual_vitals', {})
+                        for vital_name, vital_info in vitals_data.items():
+                            if vital_name in analyzer.ews_weights:
+                                current_val = f"{vital_info['current_value']} {vital_info['units']}"
+                                history_count = len(vital_info['history'])
+
+                                trend_info = individual_vitals.get(vital_name, {})
+                                if trend_info.get('status') == 'analyzed':
+                                    trend_text = f"{trend_info['trend'].title()} (R²={trend_info['r_squared']:.3f})"
+                                else:
+                                    trend_text = "Insufficient data"
+
+                                vitals_history_data.append([
+                                    vital_name,
+                                    current_val,
+                                    trend_text,
+                                    str(history_count + 1)  # +1 for current value
+                                ])
+
+                        vitals_history_table = Table(vitals_history_data, colWidths=[1.5*inch, 1.5*inch, 2*inch, 1*inch])
+                        vitals_history_table.setStyle(TableStyle([
+                            ('BACKGROUND', (0, 0), (-1, 0), colors.darkred),
+                            ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                            ('FONTSIZE', (0, 0), (-1, 0), 9),
+                            ('BACKGROUND', (0, 1), (-1, -1), colors.mistyrose),
+                            ('GRID', (0, 0), (-1, -1), 1, colors.black)
+                        ]))
+
+                        story.append(vitals_history_table)
+
+                    else:
+                        story.append(Paragraph("Note: HDF5 file containing vital signs data not found", styles['Normal']))
+                else:
+                    story.append(Paragraph("Note: Data directory not found for vitals analysis", styles['Normal']))
+
+            except Exception as e:
+                story.append(Paragraph(f"Note: Vitals analysis not available: {str(e)}", styles['Normal']))
+
+            story.append(Spacer(1, 12))
 
             # === SPECIFIC EVENT REPORT SECTION ===
             story.append(Paragraph(f"Detailed Event Report: {event_id}", heading_style))
@@ -3211,6 +3384,7 @@ class RMSAIDashboard:
         display_events['Avg Error Score'] = display_events['Avg Error Score'].round(4)
         display_events['Timestamp'] = pd.to_datetime(display_events['Timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
 
+
         # Sort by timestamp descending
         display_events = display_events.sort_values('Timestamp', ascending=False)
 
@@ -3304,8 +3478,8 @@ class RMSAIDashboard:
                     cols[5].write(row['Timestamp'])
                     cols[6].write(row['Comparison'])
 
-                    # View Report button
-                    if cols[7].button("📋 View Report", key=f"view_report_{row['Event ID']}_{idx}_{page}"):
+                    # View Event Report button (renamed)
+                    if cols[7].button("📋 View Event Report", key=f"view_report_{row['Event ID']}_{idx}_{page}"):
                         st.session_state.selected_event_for_report = row['Event ID']
                         st.rerun()
 
@@ -3314,6 +3488,7 @@ class RMSAIDashboard:
             st.info(f"Showing {min(rows_per_page, len(filtered_events) - start_idx)} of {len(filtered_events)} events (Page {page} of {total_pages})")
         else:
             st.warning("No events match the selected filters")
+
 
         # Performance Stats Section
         st.subheader("Processing Performance")
@@ -3434,6 +3609,387 @@ class RMSAIDashboard:
                     }
                 )
                 st.plotly_chart(fig, width='stretch')
+
+    def render_vitals_analysis(self, selected_patient: str, patient_events: pd.DataFrame):
+        """Render comprehensive vitals analysis section with EWS scoring and trends"""
+        st.subheader("🫀 Vital Signs Analysis")
+        st.markdown("*Early Warning System (EWS) scoring, trend analysis, and clinical assessment*")
+
+        if len(patient_events) == 0:
+            st.warning("No patient events available for vitals analysis")
+            return
+
+        # Event selection for vitals analysis
+        event_options = sorted(patient_events['event_id'].unique())
+        selected_event = st.selectbox(
+            "Select Event for Detailed Vitals Analysis",
+            event_options,
+            key="vitals_event_select"
+        )
+
+        if not selected_event:
+            return
+
+        # Import the vitals analyzer
+        try:
+            import sys
+            import os
+            sys.path.append(os.path.dirname(__file__))
+            from rmsai_vitals_analysis import RMSAIVitalsAnalyzer
+        except ImportError as e:
+            st.error(f"Could not import vitals analysis module: {e}")
+            return
+
+        # Find HDF5 file for the selected event
+        try:
+            # Look for HDF5 files in data directory
+            data_dir = "data"
+            if not os.path.exists(data_dir):
+                st.error("Data directory not found. Please ensure HDF5 files are in the 'data' directory.")
+                return
+
+            # Find HDF5 file that contains this event
+            hdf5_files = [f for f in os.listdir(data_dir) if f.endswith('.h5')]
+
+            if not hdf5_files:
+                st.error("No HDF5 files found in data directory.")
+                return
+
+            # Try to find the file containing the selected event
+            target_hdf5 = None
+            for hdf5_file in hdf5_files:
+                hdf5_path = os.path.join(data_dir, hdf5_file)
+                try:
+                    with h5py.File(hdf5_path, 'r') as f:
+                        if selected_event in f:
+                            target_hdf5 = hdf5_path
+                            break
+                except:
+                    continue
+
+            if not target_hdf5:
+                st.error(f"Could not find HDF5 file containing event {selected_event}")
+                st.info(f"Available HDF5 files: {hdf5_files}")
+                return
+
+            # Initialize analyzer
+            analyzer = RMSAIVitalsAnalyzer(window_size=6, recent_values_count=3)
+
+            # Extract vitals data from HDF5
+            with st.spinner("Analyzing vital signs data..."):
+                vitals_data = analyzer.extract_vitals_history_from_hdf5(target_hdf5, selected_event)
+                analysis_results = analyzer.analyze_vital_trends(vitals_data)
+
+            # Display current EWS status
+            st.subheader("📊 Current Early Warning System (EWS) Status")
+
+            current_ews = analysis_results['current_ews']
+            col1, col2, col3, col4 = st.columns(4)
+
+            with col1:
+                st.metric("EWS Score", current_ews['total_score'])
+
+            with col2:
+                st.metric("Risk Category", current_ews['risk_category'])
+
+            with col3:
+                risk_color = current_ews['risk_color']
+                st.markdown(f"**Risk Level:** <span style='color: {risk_color}'>●</span> {current_ews['risk_category']}",
+                           unsafe_allow_html=True)
+
+            with col4:
+                # Show trend if available
+                ews_trend = analysis_results.get('ews_trend_analysis')
+                if ews_trend:
+                    trend_emoji = {
+                        'improving': '📈',
+                        'deteriorating': '📉',
+                        'stable': '➡️'
+                    }.get(ews_trend['overall_trend'], '❓')
+                    st.metric("Trend", f"{trend_emoji} {ews_trend['overall_trend'].title()}")
+
+            # Clinical Response
+            st.info(f"**Clinical Response:** {current_ews['clinical_response']}")
+
+            # Generate and display plots
+            plots = analyzer.create_vitals_dashboard_plots(vitals_data, analysis_results)
+
+            # EWS Trend Plot
+            if 'ews_trend' in plots:
+                st.subheader("📈 EWS Score Trend Analysis")
+                st.plotly_chart(plots['ews_trend'], use_container_width=True)
+
+            # Current Risk Gauge
+            if 'current_risk_gauge' in plots:
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.plotly_chart(plots['current_risk_gauge'], use_container_width=True)
+
+                with col2:
+                    st.subheader("🎯 EWS Score Breakdown")
+                    breakdown_data = []
+                    for vital_name, vital_info in current_ews['score_breakdown'].items():
+                        breakdown_data.append({
+                            'Vital Sign': vital_name,
+                            'Value': vital_info.get('value', 'N/A'),
+                            'EWS Points': vital_info.get('score', 0),
+                            'Notes': vital_info.get('note', '')
+                        })
+
+                    st.dataframe(pd.DataFrame(breakdown_data), use_container_width=True, hide_index=True)
+
+            # Individual Vitals Trends
+            if 'individual_vitals' in plots:
+                st.subheader("📊 Individual Vitals Trends")
+                st.plotly_chart(plots['individual_vitals'], use_container_width=True)
+
+            # Clinical Summary
+            st.subheader("🏥 Clinical Assessment Summary")
+
+            clinical_summary = analyzer.generate_clinical_summary(analysis_results)
+
+            # Current Status
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown("**Current Patient Status:**")
+                st.markdown(f"- EWS Score: **{clinical_summary['current_status']['ews_score']}**")
+                st.markdown(f"- Risk Category: **{clinical_summary['current_status']['risk_category']}**")
+                st.markdown(f"- Monitoring Frequency: **{clinical_summary['monitoring_frequency'].title()}**")
+
+            with col2:
+                st.markdown("**Trend Assessment:**")
+                if clinical_summary.get('trend_assessment'):
+                    trend_info = clinical_summary['trend_assessment']
+                    st.markdown(f"- Overall Trend: **{trend_info['overall_trend'].title()}**")
+                    st.markdown(f"- Confidence: **{trend_info['confidence'].title()}**")
+                    st.markdown(f"- Clinical Interpretation: {trend_info['interpretation']}")
+
+            # Recommendations
+            if clinical_summary.get('recommendations'):
+                st.markdown("**Clinical Recommendations:**")
+                for rec in clinical_summary['recommendations']:
+                    st.markdown(f"• {rec}")
+
+            # Individual Vital Alerts
+            if clinical_summary.get('individual_vital_alerts'):
+                st.subheader("⚠️ Individual Vital Sign Alerts")
+                alert_data = []
+                for alert in clinical_summary['individual_vital_alerts']:
+                    alert_data.append({
+                        'Vital Sign': alert['vital'],
+                        'Trend': alert['trend'].title(),
+                        'Clinical Interpretation': alert['interpretation'],
+                        'Trend Strength': f"{alert['confidence']:.2f}"
+                    })
+
+                st.dataframe(pd.DataFrame(alert_data), use_container_width=True, hide_index=True)
+
+            # Detailed EWS History (expandable)
+            with st.expander("🔍 Detailed EWS History Analysis", expanded=False):
+                ews_detailed_history = analysis_results['ews_history'].get('detailed_history', [])
+
+                if ews_detailed_history:
+                    st.markdown("**Complete EWS calculation history with vital signs breakdown:**")
+
+                    detailed_data = []
+                    for entry in ews_detailed_history:
+                        vitals_str = ', '.join([f"{k}: {v}" for k, v in entry['vitals_used'].items()])
+                        detailed_data.append({
+                            'Timestamp': entry['datetime'].strftime('%Y-%m-%d %H:%M:%S'),
+                            'EWS Score': entry['ews_breakdown']['total_score'],
+                            'Risk Category': entry['ews_breakdown']['risk_category'],
+                            'Vitals Used': vitals_str
+                        })
+
+                    st.dataframe(pd.DataFrame(detailed_data), use_container_width=True, hide_index=True)
+                else:
+                    st.info("No detailed EWS history available")
+
+        except Exception as e:
+            st.error(f"Error performing vitals analysis: {str(e)}")
+            st.exception(e)
+
+    def render_vitals_analysis_for_report(self, patient_id: str, event_id: str):
+        """Render vitals analysis section specifically for the View Report page"""
+        st.subheader("🫀 Vital Signs Analysis")
+        st.markdown("*Early Warning System (EWS) scoring and clinical assessment for this specific event*")
+
+        # Import the vitals analyzer
+        try:
+            import sys
+            import os
+            sys.path.append(os.path.dirname(__file__))
+            from rmsai_vitals_analysis import RMSAIVitalsAnalyzer
+        except ImportError as e:
+            st.error(f"Could not import vitals analysis module: {e}")
+            return
+
+        # Find HDF5 file for the selected event
+        try:
+            # Look for HDF5 files in data directory
+            data_dir = "data"
+            if not os.path.exists(data_dir):
+                st.error("Data directory not found. Please ensure HDF5 files are in the 'data' directory.")
+                return
+
+            # Find HDF5 file that contains this event
+            hdf5_files = [f for f in os.listdir(data_dir) if f.endswith('.h5')]
+
+            if not hdf5_files:
+                st.error("No HDF5 files found in data directory.")
+                return
+
+            # Try to find the file containing the selected event
+            target_hdf5 = None
+            for hdf5_file in hdf5_files:
+                hdf5_path = os.path.join(data_dir, hdf5_file)
+                try:
+                    with h5py.File(hdf5_path, 'r') as f:
+                        if event_id in f:
+                            target_hdf5 = hdf5_path
+                            break
+                except:
+                    continue
+
+            if not target_hdf5:
+                st.error(f"Could not find HDF5 file containing event {event_id}")
+                st.info(f"Available HDF5 files: {hdf5_files}")
+                return
+
+            # Initialize analyzer
+            analyzer = RMSAIVitalsAnalyzer(window_size=6, recent_values_count=3)
+
+            # Extract vitals data from HDF5
+            with st.spinner("Analyzing vital signs data..."):
+                vitals_data = analyzer.extract_vitals_history_from_hdf5(target_hdf5, event_id)
+                analysis_results = analyzer.analyze_vital_trends(vitals_data)
+
+            # Display current EWS status in a more compact format for the report
+            current_ews = analysis_results['current_ews']
+
+            # EWS Summary Card
+            col1, col2, col3 = st.columns(3)
+
+            with col1:
+                st.metric("EWS Score", current_ews['total_score'])
+                risk_color = current_ews['risk_color']
+                st.markdown(f"**Risk Level:** <span style='color: {risk_color}; font-weight: bold;'>{current_ews['risk_category']}</span>",
+                           unsafe_allow_html=True)
+
+            with col2:
+                # Show trend if available
+                ews_trend = analysis_results.get('ews_trend_analysis')
+                if ews_trend:
+                    trend_emoji = {
+                        'improving': '📈 ↗️',
+                        'deteriorating': '📉 ↘️',
+                        'stable': '➡️ →'
+                    }.get(ews_trend['overall_trend'], '❓')
+                    st.metric("Trend", f"{ews_trend['overall_trend'].title()}")
+                    st.markdown(f"**Direction:** {trend_emoji}")
+                    st.caption(f"Confidence: {ews_trend['confidence']}")
+                else:
+                    st.metric("Trend", "Insufficient Data")
+
+            with col3:
+                clinical_summary = analyzer.generate_clinical_summary(analysis_results)
+                st.markdown("**Monitoring Frequency:**")
+                st.markdown(f"**{clinical_summary['monitoring_frequency'].title()}**")
+
+                # Show alert status
+                if clinical_summary.get('individual_vital_alerts'):
+                    st.warning(f"⚠️ {len(clinical_summary['individual_vital_alerts'])} vital sign alerts")
+                else:
+                    st.success("✅ No vital sign alerts")
+
+            # Clinical Response
+            st.info(f"**Clinical Response:** {current_ews['clinical_response']}")
+
+            # EWS Score Breakdown in a compact table
+            st.subheader("📊 EWS Score Breakdown")
+
+            breakdown_data = []
+            for vital_name, vital_info in current_ews['score_breakdown'].items():
+                breakdown_data.append({
+                    'Vital Sign': vital_name,
+                    'Value': vital_info.get('value', 'N/A'),
+                    'EWS Points': vital_info.get('score', 0),
+                    'Status': 'Missing' if vital_info.get('note') else 'Normal' if vital_info.get('score', 0) == 0 else 'Alert'
+                })
+
+            breakdown_df = pd.DataFrame(breakdown_data)
+            st.dataframe(breakdown_df, use_container_width=True, hide_index=True)
+
+            # EWS Scoring Template Reference
+            with st.expander("📋 EWS Scoring Template (NEWS2)", expanded=False):
+                st.markdown("**Reference scoring template used for EWS calculations:**")
+
+                # Import configuration
+                from config import get_ews_scoring_template, get_ews_risk_categories
+
+                ews_template = get_ews_scoring_template()
+                risk_categories = get_ews_risk_categories()
+
+                # Display scoring template for each vital
+                for vital_name, vital_config in ews_template.items():
+                    st.markdown(f"**{vital_config['display_name']} ({vital_config['units']})**")
+
+                    template_data = []
+                    for range_config in vital_config['ranges']:
+                        template_data.append({
+                            'Range': range_config['range'],
+                            'EWS Points': range_config['score']
+                        })
+
+                    template_df = pd.DataFrame(template_data)
+                    st.dataframe(template_df, use_container_width=True, hide_index=True)
+
+                # Display risk categories
+                st.markdown("**Risk Categories:**")
+                risk_data = []
+                for level, config in risk_categories.items():
+                    score_min, score_max = config['score_range']
+                    score_range = f"{score_min}-{score_max}" if score_max != float('inf') else f"{score_min}+"
+
+                    risk_data.append({
+                        'Total Score': score_range,
+                        'Risk Level': config['category'],
+                        'Monitoring Frequency': config['monitoring_frequency'],
+                        'Clinical Response': config['clinical_response']
+                    })
+
+                risk_df = pd.DataFrame(risk_data)
+                st.dataframe(risk_df, use_container_width=True, hide_index=True)
+
+            # Generate and display plots (compact versions for report)
+            plots = analyzer.create_vitals_dashboard_plots(vitals_data, analysis_results)
+
+            # Show EWS trend plot if available
+            if 'ews_trend' in plots and ews_trend:
+                st.subheader("📈 EWS Trend Analysis")
+                st.plotly_chart(plots['ews_trend'], use_container_width=True, height=400)
+
+            # Individual vitals in a more compact view
+            if 'individual_vitals' in plots:
+                with st.expander("📊 Individual Vitals Trends", expanded=False):
+                    st.plotly_chart(plots['individual_vitals'], use_container_width=True)
+
+            # Clinical recommendations in a compact format
+            if clinical_summary.get('recommendations'):
+                st.subheader("🏥 Clinical Recommendations")
+                for i, rec in enumerate(clinical_summary['recommendations'], 1):
+                    st.markdown(f"{i}. {rec}")
+
+            # Individual vital alerts if any
+            if clinical_summary.get('individual_vital_alerts'):
+                st.subheader("⚠️ Vital Sign Alerts")
+                for alert in clinical_summary['individual_vital_alerts']:
+                    st.warning(f"**{alert['vital']}**: {alert['trend'].title()} trend - {alert['interpretation']}")
+
+        except Exception as e:
+            st.error(f"Error performing vitals analysis: {str(e)}")
+            if st.checkbox("Show detailed error"):
+                st.exception(e)
 
     def render_api_status(self):
         """Render API connection status"""

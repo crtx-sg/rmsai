@@ -147,3 +147,144 @@ def get_default_ecg_config() -> dict:
 def sort_by_severity(anomaly_list: list) -> list:
     """Sort anomaly types by clinical severity (most severe first)"""
     return sorted(anomaly_list, key=lambda x: get_severity_score(x), reverse=True)
+
+# Early Warning System (EWS) Configuration
+# Based on NEWS2 (National Early Warning Score 2) scoring system
+EWS_SCORING_TEMPLATE = {
+    'heart_rate': {
+        'ranges': [
+            {'range': '≤40', 'score': 3, 'min': 0, 'max': 40},
+            {'range': '41-50', 'score': 1, 'min': 41, 'max': 50},
+            {'range': '51-90', 'score': 0, 'min': 51, 'max': 90},
+            {'range': '91-110', 'score': 1, 'min': 91, 'max': 110},
+            {'range': '111-130', 'score': 2, 'min': 111, 'max': 130},
+            {'range': '≥131', 'score': 3, 'min': 131, 'max': 999}
+        ],
+        'units': 'bpm',
+        'display_name': 'Heart Rate'
+    },
+    'respiratory_rate': {
+        'ranges': [
+            {'range': '≤8', 'score': 3, 'min': 0, 'max': 8},
+            {'range': '9-11', 'score': 1, 'min': 9, 'max': 11},
+            {'range': '12-20', 'score': 0, 'min': 12, 'max': 20},
+            {'range': '21-24', 'score': 2, 'min': 21, 'max': 24},
+            {'range': '≥25', 'score': 3, 'min': 25, 'max': 999}
+        ],
+        'units': 'breaths/min',
+        'display_name': 'Respiratory Rate'
+    },
+    'systolic_bp': {
+        'ranges': [
+            {'range': '≤90', 'score': 3, 'min': 0, 'max': 90},
+            {'range': '91-100', 'score': 2, 'min': 91, 'max': 100},
+            {'range': '101-110', 'score': 1, 'min': 101, 'max': 110},
+            {'range': '111-219', 'score': 0, 'min': 111, 'max': 219},
+            {'range': '≥220', 'score': 3, 'min': 220, 'max': 999}
+        ],
+        'units': 'mmHg',
+        'display_name': 'Systolic Blood Pressure'
+    },
+    'temperature': {
+        'ranges': [
+            {'range': '≤35.0', 'score': 3, 'min': 0, 'max': 35.0},
+            {'range': '35.1-36.0', 'score': 1, 'min': 35.1, 'max': 36.0},
+            {'range': '36.1-38.0', 'score': 0, 'min': 36.1, 'max': 38.0},
+            {'range': '38.1-39.0', 'score': 1, 'min': 38.1, 'max': 39.0},
+            {'range': '≥39.1', 'score': 2, 'min': 39.1, 'max': 999}
+        ],
+        'units': '°C',
+        'display_name': 'Temperature'
+    },
+    'oxygen_saturation': {
+        'ranges': [
+            {'range': '≤91', 'score': 3, 'min': 0, 'max': 91},
+            {'range': '92-93', 'score': 2, 'min': 92, 'max': 93},
+            {'range': '94-95', 'score': 1, 'min': 94, 'max': 95},
+            {'range': '≥96', 'score': 0, 'min': 96, 'max': 100}
+        ],
+        'units': '%',
+        'display_name': 'Oxygen Saturation (SpO2)'
+    },
+    'consciousness': {
+        'ranges': [
+            {'range': 'Alert', 'score': 0, 'value': 'alert'},
+            {'range': 'CVPU', 'score': 3, 'value': 'cvpu'}  # Confusion, Voice, Pain, Unresponsive
+        ],
+        'units': '',
+        'display_name': 'Level of Consciousness'
+    }
+}
+
+# EWS Risk Categories based on total score
+EWS_RISK_CATEGORIES = {
+    'low': {
+        'score_range': (0, 4),
+        'category': 'Low Risk',
+        'color': '#28a745',  # Green
+        'monitoring_frequency': 'every 12 hours',
+        'clinical_response': 'Continue routine monitoring'
+    },
+    'medium': {
+        'score_range': (5, 6),
+        'category': 'Medium Risk',
+        'color': '#ffc107',  # Yellow/Orange
+        'monitoring_frequency': 'every 4-6 hours',
+        'clinical_response': 'Increase monitoring frequency and consider medical review'
+    },
+    'high': {
+        'score_range': (7, float('inf')),
+        'category': 'High Risk',
+        'color': '#dc3545',  # Red
+        'monitoring_frequency': 'continuous or every hour',
+        'clinical_response': 'Urgent medical review required and consider intensive monitoring'
+    }
+}
+
+def get_ews_scoring_template() -> dict:
+    """Get the EWS scoring template configuration"""
+    return EWS_SCORING_TEMPLATE.copy()
+
+def get_ews_risk_categories() -> dict:
+    """Get the EWS risk categories configuration"""
+    return EWS_RISK_CATEGORIES.copy()
+
+def get_ews_score_for_vital(vital_name: str, value: float) -> int:
+    """Get EWS score for a specific vital sign value"""
+    if vital_name not in EWS_SCORING_TEMPLATE:
+        return 0
+
+    vital_config = EWS_SCORING_TEMPLATE[vital_name]
+
+    for range_config in vital_config['ranges']:
+        if 'min' in range_config and 'max' in range_config:
+            if range_config['min'] <= value <= range_config['max']:
+                return range_config['score']
+        elif 'value' in range_config:
+            # For categorical values like consciousness
+            if str(value).lower() == range_config['value']:
+                return range_config['score']
+
+    return 0  # Default score if no range matches
+
+def get_ews_risk_category(total_score: int) -> dict:
+    """Get risk category information for a given EWS total score"""
+    for category, config in EWS_RISK_CATEGORIES.items():
+        score_min, score_max = config['score_range']
+        if score_min <= total_score <= score_max:
+            return {
+                'category': config['category'],
+                'color': config['color'],
+                'monitoring_frequency': config['monitoring_frequency'],
+                'clinical_response': config['clinical_response'],
+                'level': category
+            }
+
+    # Default to high risk if score is very high
+    return {
+        'category': 'High Risk',
+        'color': '#dc3545',
+        'monitoring_frequency': 'continuous',
+        'clinical_response': 'Immediate medical attention required',
+        'level': 'high'
+    }

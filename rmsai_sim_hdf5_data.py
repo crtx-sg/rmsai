@@ -31,6 +31,7 @@ from datetime import datetime, timedelta
 import time
 import uuid
 import os
+import json
 
 # --- Configuration Constants ---
 FS_ECG = 200.0          # ECG sampling frequency in Hz
@@ -311,6 +312,105 @@ def generate_impedance_signals(hr, condition, duration=ECG_DURATION, fs=FS_RESP)
 
     return impedance, respiration
 
+def generate_vital_history(vital_name, current_value, current_timestamp, condition, num_samples=30):
+    """Generate historical vital sign data for the specified number of past samples."""
+    history = []
+
+    # Generate history going backwards in time from current timestamp
+    # Intervals between measurements vary by vital type (realistic medical intervals)
+    interval_ranges = {
+        'HR': (60, 300),           # 1-5 minutes between HR measurements
+        'Pulse': (60, 300),        # 1-5 minutes between pulse measurements
+        'SpO2': (30, 180),         # 30 seconds to 3 minutes for SpO2
+        'Systolic': (300, 1800),   # 5-30 minutes between BP measurements
+        'Diastolic': (300, 1800),  # 5-30 minutes between BP measurements
+        'RespRate': (120, 600),    # 2-10 minutes between respiratory rate
+        'Temp': (1800, 3600),     # 30 minutes to 1 hour between temperature
+        'XL_Posture': (10, 60)     # 10 seconds to 1 minute for posture
+    }
+
+    min_interval, max_interval = interval_ranges.get(vital_name, (60, 300))
+
+    # Generate baseline variation patterns based on condition and vital type
+    if vital_name == 'HR':
+        if condition == 'Tachycardia':
+            baseline_trend = random.uniform(-5, 2)  # Slight downward trend as condition develops
+            variation = 8
+        elif condition == 'Bradycardia':
+            baseline_trend = random.uniform(-2, 5)  # Slight upward trend
+            variation = 5
+        elif 'Atrial Fibrillation' in condition:
+            baseline_trend = 0
+            variation = 15  # More irregular
+        else:
+            baseline_trend = 0
+            variation = 5
+    elif vital_name in ['Systolic', 'Diastolic']:
+        # Blood pressure trends
+        baseline_trend = random.uniform(-1, 1)
+        variation = 8 if condition != 'Normal' else 5
+    elif vital_name == 'SpO2':
+        if 'Ventricular Tachycardia' in condition:
+            baseline_trend = random.uniform(-0.5, 1.5)  # Recovering SpO2
+            variation = 3
+        else:
+            baseline_trend = 0
+            variation = 1
+    elif vital_name == 'Temp':
+        baseline_trend = random.uniform(-0.1, 0.1)  # Very stable
+        variation = 1.0
+    else:
+        baseline_trend = 0
+        variation = random.uniform(1, 3)
+
+    current_time = current_timestamp
+    current_val = current_value
+
+    # Generate historical samples going backwards
+    for i in range(num_samples):
+        # Calculate time interval (seconds ago)
+        interval = random.uniform(min_interval, max_interval)
+        historical_timestamp = current_time - interval * (i + 1)
+
+        # Calculate historical value with trend and variation
+        trend_offset = baseline_trend * (i + 1) * 0.1  # Gradual trend over time
+        random_variation = random.uniform(-variation, variation)
+        historical_value = current_val + trend_offset + random_variation
+
+        # Apply realistic bounds for each vital type
+        if vital_name == 'HR':
+            historical_value = max(30, min(220, historical_value))
+        elif vital_name == 'Pulse':
+            historical_value = max(30, min(220, historical_value))
+        elif vital_name == 'SpO2':
+            historical_value = max(70, min(100, historical_value))
+        elif vital_name == 'Systolic':
+            historical_value = max(70, min(250, historical_value))
+        elif vital_name == 'Diastolic':
+            historical_value = max(40, min(150, historical_value))
+        elif vital_name == 'RespRate':
+            historical_value = max(8, min(40, historical_value))
+        elif vital_name == 'Temp':
+            historical_value = max(94.0, min(108.0, historical_value))  # Fahrenheit
+        elif vital_name == 'XL_Posture':
+            historical_value = max(-90, min(90, historical_value))
+
+        # Round appropriately for vital type
+        if vital_name in ['HR', 'Pulse', 'SpO2', 'Systolic', 'Diastolic', 'RespRate', 'XL_Posture']:
+            historical_value = int(round(historical_value))
+        else:  # Temperature
+            historical_value = round(historical_value, 1)
+
+        history.append({
+            "value": historical_value,
+            "timestamp": historical_timestamp
+        })
+
+    # Sort by timestamp (oldest first)
+    history.sort(key=lambda x: x["timestamp"])
+
+    return history
+
 def generate_vitals_single(hr, condition, event_timestamp):
     """Generate single vital sign values with individual timestamps and thresholds."""
     # Generate base vitals
@@ -521,9 +621,12 @@ def create_metadata_group(hf, patient_id, event_timestamps):
     # Device information
     metadata_group.create_dataset('device_info', data=np.bytes_('RMSAI-SimDevice-v1.0'))
 
+    # Vitals history configuration
+    metadata_group.create_dataset('max_vital_history', data=30)  # Default: store last 30 samples
+
     return metadata_group
 
-def create_event_group(hf, event_id, condition, hr, event_timestamp):
+def create_event_group(hf, event_id, condition, hr, event_timestamp, max_vital_history=30):
     """Create an event group with all signal data."""
     event_group = hf.create_group(f'event_{event_id}')
 
@@ -536,7 +639,7 @@ def create_event_group(hf, event_id, condition, hr, event_timestamp):
     ecg_aVF = generate_ecg_lead(hr, condition, lead_type='aVF')
     ecg_vVX = generate_ecg_lead(hr, condition, lead_type='vVX')
 
-    # ECG group with pacer info
+    # ECG group with extras JSON
     ecg_group = event_group.create_group('ecg')
     ecg_group.create_dataset('ECG1', data=ecg_lead_I, compression='gzip')
     ecg_group.create_dataset('ECG2', data=ecg_lead_II, compression='gzip')
@@ -546,25 +649,34 @@ def create_event_group(hf, event_id, condition, hr, event_timestamp):
     ecg_group.create_dataset('aVF', data=ecg_aVF, compression='gzip')
     ecg_group.create_dataset('vVX', data=ecg_vVX, compression='gzip')
 
-    # Add pacer information as 4-byte integer
+    # Create extras JSON object for ECG with pacer information
     pacer_info = generate_pacer_info(condition)
-    ecg_group.create_dataset('pacer_info', data=pacer_info, dtype=np.int32)
-
-    # Add pacer offset as integer (sample number within ECG window)
     pacer_offset = generate_pacer_offset(condition)
-    ecg_group.create_dataset('pacer_offset', data=pacer_offset, dtype=np.int32)
+    ecg_extras = {
+        "pacer_info": int(pacer_info),
+        "pacer_offset": int(pacer_offset)
+    }
+    ecg_group.create_dataset('extras', data=json.dumps(ecg_extras).encode('utf-8'))
 
-    # PPG group
+    # PPG group with extras
     ppg_signal = generate_ppg_signal(hr, condition)
     ppg_group = event_group.create_group('ppg')
     ppg_group.create_dataset('PPG', data=ppg_signal, compression='gzip')
 
-    # Respiratory group
+    # Create empty extras JSON object for PPG (user can customize later)
+    ppg_extras = {}
+    ppg_group.create_dataset('extras', data=json.dumps(ppg_extras).encode('utf-8'))
+
+    # Respiratory group with extras
     resp_signal = generate_respiratory_waveform(hr, condition)
     resp_group = event_group.create_group('resp')
     resp_group.create_dataset('RESP', data=resp_signal, compression='gzip')
 
-    # Vitals group (single values with units, timestamps, and thresholds)
+    # Create empty extras JSON object for respiratory (user can customize later)
+    resp_extras = {}
+    resp_group.create_dataset('extras', data=json.dumps(resp_extras).encode('utf-8'))
+
+    # Vitals group (single values with units, timestamps, and extras)
     vitals_data = generate_vitals_single(hr, condition, event_timestamp)
     vitals_group = event_group.create_group('vitals')
     for vital_name, vital_info in vitals_data.items():
@@ -573,14 +685,30 @@ def create_event_group(hf, event_id, condition, hr, event_timestamp):
         vital_subgroup.create_dataset('units', data=vital_info['units'].encode('utf-8'))
         vital_subgroup.create_dataset('timestamp', data=vital_info['timestamp'])
 
-        # Add thresholds for all vitals except XL_Posture
+        # Create extras JSON object for each vital
+        vital_extras = {}
+
+        # Add thresholds to extras for all vitals except XL_Posture
         if vital_name != 'XL_Posture':
-            vital_subgroup.create_dataset('upper_threshold', data=vital_info['upper_threshold'])
-            vital_subgroup.create_dataset('lower_threshold', data=vital_info['lower_threshold'])
+            vital_extras['upper_threshold'] = vital_info['upper_threshold']
+            vital_extras['lower_threshold'] = vital_info['lower_threshold']
         else:
-            # Add special attributes for XL_Posture
-            vital_subgroup.create_dataset('step_count', data=vital_info['step_count'])
-            vital_subgroup.create_dataset('time_since_posture_change', data=vital_info['time_since_posture_change'])
+            # Add special attributes to extras for XL_Posture
+            vital_extras['step_count'] = vital_info['step_count']
+            vital_extras['time_since_posture_change'] = vital_info['time_since_posture_change']
+
+        # Generate and add history data
+        vital_history = generate_vital_history(
+            vital_name,
+            vital_info['value'],
+            vital_info['timestamp'],
+            condition,
+            max_vital_history
+        )
+        vital_extras['history'] = vital_history
+
+        # Store extras as JSON
+        vital_subgroup.create_dataset('extras', data=json.dumps(vital_extras).encode('utf-8'))
 
     # Convert event timestamp to epoch
     event_epoch = time.mktime(event_timestamp.timetuple()) + event_timestamp.microsecond / 1e6
@@ -634,6 +762,9 @@ def main(num_events, patient_id=None, condition_proportions=None):
         metadata_group = create_metadata_group(hf, patient_id, event_timestamps)
         print(f"  - Created metadata group")
 
+        # Get max vital history from metadata
+        max_vital_history = metadata_group['max_vital_history'][()]
+
         # Create event groups
         for i in range(num_events):
             condition, hr = generate_condition_and_hr(condition_proportions)
@@ -641,16 +772,17 @@ def main(num_events, patient_id=None, condition_proportions=None):
 
             print(f"  - Creating event_{1001+i}: {condition} (HR: {hr} bpm) at {event_timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
 
-            event_group = create_event_group(hf, 1001+i, condition, hr, event_timestamp)
+            event_group = create_event_group(hf, 1001+i, condition, hr, event_timestamp, max_vital_history)
 
     print(f"\nDataset generation complete.")
     print(f"File '{filepath}' created successfully.")
     print("\nFile structure:")
     print(f"├── metadata/ (sampling rates, timing, units)")
     print(f"├── event_1001/ through event_{1000+num_events}/")
-    print(f"    ├── ecg/ (7 leads at 200Hz)")
-    print(f"    ├── ppg/ (signal at 200Hz)")
-    print(f"    └── vitals/ (single values: HR, Pulse, SpO2, BP, Temp, Posture)")
+    print(f"    ├── ecg/ (7 leads at 200Hz + extras JSON with pacer info)")
+    print(f"    ├── ppg/ (signal at 75Hz + extras JSON for customization)")
+    print(f"    ├── resp/ (signal at 33.33Hz + extras JSON for customization)")
+    print(f"    └── vitals/ (single values: HR, Pulse, SpO2, BP, Temp, Posture + extras JSON with thresholds)")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(

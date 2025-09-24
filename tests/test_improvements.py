@@ -602,21 +602,38 @@ class ImprovementTester:
 
                 first_event = f[events[0]]
 
-                # Test pacer_info presence
-                if 'pacer_info' not in first_event['ecg']:
-                    logger.error("pacer_info not found in ECG data")
+                # Test new extras JSON structure first
+                pacer_info = None
+                pacer_offset = None
+
+                if 'extras' in first_event['ecg']:
+                    try:
+                        extras_json = json.loads(first_event['ecg']['extras'][()].decode('utf-8'))
+                        pacer_info = extras_json.get('pacer_info')
+                        pacer_offset = extras_json.get('pacer_offset')
+                        logger.info("✅ Found pacer data in new extras JSON structure")
+                        logger.info(f"Found pacer_info from extras: 0x{pacer_info:08X}")
+                        logger.info(f"Found pacer_offset from extras: {pacer_offset} samples")
+                    except (json.JSONDecodeError, KeyError) as e:
+                        logger.warning(f"Could not parse extras JSON: {e}")
+
+                # Fallback to legacy structure if extras failed
+                if pacer_info is None and 'pacer_info' in first_event['ecg']:
+                    pacer_info = first_event['ecg']['pacer_info'][()]
+                    logger.info(f"Found pacer_info from legacy structure: 0x{pacer_info:08X}")
+
+                if pacer_offset is None and 'pacer_offset' in first_event['ecg']:
+                    pacer_offset = first_event['ecg']['pacer_offset'][()]
+                    logger.info(f"Found pacer_offset from legacy structure: {pacer_offset} samples")
+
+                # Validate that we found pacer data
+                if pacer_info is None:
+                    logger.error("pacer_info not found in either extras or legacy structure")
                     return False
 
-                pacer_info = first_event['ecg']['pacer_info'][()]
-                logger.info(f"Found pacer_info: 0x{pacer_info:08X}")
-
-                # Test pacer_offset presence
-                if 'pacer_offset' not in first_event['ecg']:
-                    logger.error("pacer_offset not found in ECG data")
+                if pacer_offset is None:
+                    logger.error("pacer_offset not found in either extras or legacy structure")
                     return False
-
-                pacer_offset = first_event['ecg']['pacer_offset'][()]
-                logger.info(f"Found pacer_offset: {pacer_offset} samples")
 
                 # Validate pacer_offset range
                 if not (0 <= pacer_offset <= 2400):
@@ -1015,6 +1032,286 @@ class ImprovementTester:
             logger.error(f"❌ Threshold classification test failed: {e}")
             return False
 
+    def test_extras_json_functionality(self) -> bool:
+        """Test new extras JSON functionality in HDF5 files"""
+        logger.info("Testing Extras JSON Functionality...")
+
+        try:
+            # Generate test data for extras JSON testing
+            logger.info("Generating test data for extras JSON testing...")
+
+            import subprocess
+            import os
+            import h5py
+            import json
+
+            # Generate a test HDF5 file
+            result = subprocess.run([
+                sys.executable, "rmsai_sim_hdf5_data.py", "2", "--patient-id", "EXTRAS_TEST"
+            ], capture_output=True, text=True, timeout=30)
+
+            if result.returncode != 0:
+                logger.error(f"Failed to generate test data: {result.stderr}")
+                return False
+
+            # Find the generated file
+            test_file = None
+            for file in os.listdir("data"):
+                if file.startswith("EXTRAS_TEST") and file.endswith(".h5"):
+                    test_file = os.path.join("data", file)
+                    break
+
+            if not test_file:
+                logger.error("Test HDF5 file not found")
+                return False
+
+            logger.info(f"Generated test file: {test_file}")
+
+            # Test metadata for max_vital_history
+            with h5py.File(test_file, 'r') as f:
+                if 'max_vital_history' not in f['metadata']:
+                    logger.error("max_vital_history missing from metadata")
+                    return False
+
+                max_history = f['metadata']['max_vital_history'][()]
+                logger.info(f"✅ Found max_vital_history in metadata: {max_history}")
+
+                if max_history <= 0:
+                    logger.error(f"max_vital_history should be positive, got {max_history}")
+                    return False
+
+            # Test extras JSON structure
+            with h5py.File(test_file, 'r') as f:
+                events = [key for key in f.keys() if key.startswith('event_')]
+
+                if not events:
+                    logger.error("No events found in test file")
+                    return False
+
+                first_event = f[events[0]]
+
+                # Test ECG extras
+                logger.info("Testing ECG extras JSON...")
+                if 'extras' not in first_event['ecg']:
+                    logger.error("ECG extras not found")
+                    return False
+
+                try:
+                    ecg_extras = json.loads(first_event['ecg']['extras'][()].decode('utf-8'))
+                    logger.info("✅ ECG extras JSON parsed successfully")
+
+                    # Check required pacer fields
+                    if 'pacer_info' not in ecg_extras:
+                        logger.error("pacer_info missing from ECG extras")
+                        return False
+
+                    if 'pacer_offset' not in ecg_extras:
+                        logger.error("pacer_offset missing from ECG extras")
+                        return False
+
+                    logger.info(f"ECG extras contains: {list(ecg_extras.keys())}")
+                    logger.info(f"Pacer info: 0x{ecg_extras['pacer_info']:08X}")
+                    logger.info(f"Pacer offset: {ecg_extras['pacer_offset']} samples")
+
+                except (json.JSONDecodeError, KeyError) as e:
+                    logger.error(f"Failed to parse ECG extras JSON: {e}")
+                    return False
+
+                # Test PPG extras (should be empty but valid JSON)
+                logger.info("Testing PPG extras JSON...")
+                if 'extras' not in first_event['ppg']:
+                    logger.error("PPG extras not found")
+                    return False
+
+                try:
+                    ppg_extras = json.loads(first_event['ppg']['extras'][()].decode('utf-8'))
+                    logger.info("✅ PPG extras JSON parsed successfully")
+                    logger.info(f"PPG extras (should be empty): {ppg_extras}")
+
+                    if ppg_extras != {}:
+                        logger.warning(f"PPG extras not empty as expected: {ppg_extras}")
+
+                except (json.JSONDecodeError, KeyError) as e:
+                    logger.error(f"Failed to parse PPG extras JSON: {e}")
+                    return False
+
+                # Test respiratory extras (should be empty but valid JSON)
+                logger.info("Testing Respiratory extras JSON...")
+                if 'extras' not in first_event['resp']:
+                    logger.error("Respiratory extras not found")
+                    return False
+
+                try:
+                    resp_extras = json.loads(first_event['resp']['extras'][()].decode('utf-8'))
+                    logger.info("✅ Respiratory extras JSON parsed successfully")
+                    logger.info(f"Respiratory extras (should be empty): {resp_extras}")
+
+                    if resp_extras != {}:
+                        logger.warning(f"Respiratory extras not empty as expected: {resp_extras}")
+
+                except (json.JSONDecodeError, KeyError) as e:
+                    logger.error(f"Failed to parse respiratory extras JSON: {e}")
+                    return False
+
+                # Test vitals extras
+                logger.info("Testing Vitals extras JSON...")
+                vital_names = ['HR', 'Pulse', 'SpO2', 'Systolic', 'Diastolic', 'RespRate', 'Temp', 'XL_Posture']
+
+                for vital_name in vital_names:
+                    if vital_name not in first_event['vitals']:
+                        logger.error(f"Vital {vital_name} not found")
+                        return False
+
+                    vital_group = first_event['vitals'][vital_name]
+
+                    if 'extras' not in vital_group:
+                        logger.error(f"Extras not found for vital {vital_name}")
+                        return False
+
+                    try:
+                        vital_extras = json.loads(vital_group['extras'][()].decode('utf-8'))
+                        logger.info(f"✅ {vital_name} extras JSON parsed successfully")
+
+                        if vital_name != 'XL_Posture':
+                            # Check threshold fields
+                            if 'upper_threshold' not in vital_extras:
+                                logger.error(f"upper_threshold missing from {vital_name} extras")
+                                return False
+                            if 'lower_threshold' not in vital_extras:
+                                logger.error(f"lower_threshold missing from {vital_name} extras")
+                                return False
+
+                            logger.info(f"  {vital_name} thresholds: {vital_extras['lower_threshold']} - {vital_extras['upper_threshold']}")
+                        else:
+                            # Check XL_Posture special fields
+                            if 'step_count' not in vital_extras:
+                                logger.error("step_count missing from XL_Posture extras")
+                                return False
+                            if 'time_since_posture_change' not in vital_extras:
+                                logger.error("time_since_posture_change missing from XL_Posture extras")
+                                return False
+
+                            logger.info(f"  XL_Posture: {vital_extras['step_count']} steps, {vital_extras['time_since_posture_change']}s since change")
+
+                        # Check history field (should be present for all vitals)
+                        if 'history' not in vital_extras:
+                            logger.error(f"history missing from {vital_name} extras")
+                            return False
+
+                        history = vital_extras['history']
+                        if not isinstance(history, list):
+                            logger.error(f"history should be a list for {vital_name}")
+                            return False
+
+                        # Check history length matches metadata setting
+                        with h5py.File(test_file, 'r') as f2:
+                            max_history = f2['metadata']['max_vital_history'][()]
+                            if len(history) != max_history:
+                                logger.error(f"Expected {max_history} history samples, got {len(history)} for {vital_name}")
+                                return False
+
+                        logger.info(f"  {vital_name} history: {len(history)} samples")
+
+                        # Validate history structure
+                        if history:
+                            first_sample = history[0]
+                            last_sample = history[-1]
+
+                            if not isinstance(first_sample, dict) or 'value' not in first_sample or 'timestamp' not in first_sample:
+                                logger.error(f"Invalid history sample structure for {vital_name}")
+                                return False
+
+                            # Check timestamp ordering (oldest first, newest last)
+                            if first_sample['timestamp'] >= last_sample['timestamp']:
+                                logger.error(f"History timestamps not properly ordered for {vital_name}")
+                                return False
+
+                            logger.info(f"    Oldest: {first_sample['value']} at {first_sample['timestamp']}")
+                            logger.info(f"    Newest: {last_sample['value']} at {last_sample['timestamp']}")
+
+                            # Validate all samples have correct structure
+                            for i, sample in enumerate(history):
+                                if not isinstance(sample, dict) or 'value' not in sample or 'timestamp' not in sample:
+                                    logger.error(f"Invalid history sample {i} for {vital_name}")
+                                    return False
+
+                        logger.info(f"  ✅ {vital_name} history validation passed")
+
+                    except (json.JSONDecodeError, KeyError) as e:
+                        logger.error(f"Failed to parse {vital_name} extras JSON: {e}")
+                        return False
+
+                # Test custom data extension capability
+                logger.info("Testing custom data extension capability...")
+
+                # Simulate adding custom data to ECG extras
+                test_custom_ecg = {
+                    "pacer_info": ecg_extras['pacer_info'],
+                    "pacer_offset": ecg_extras['pacer_offset'],
+                    "custom_analysis": {
+                        "qrs_width": 0.08,
+                        "pr_interval": 0.16
+                    },
+                    "processing_flags": ["filtered", "baseline_corrected"]
+                }
+
+                # Test that we can encode and decode the extended JSON
+                encoded_custom = json.dumps(test_custom_ecg).encode('utf-8')
+                decoded_custom = json.loads(encoded_custom.decode('utf-8'))
+
+                if decoded_custom['custom_analysis']['qrs_width'] != 0.08:
+                    logger.error("Custom data extension test failed")
+                    return False
+
+                logger.info("✅ Custom data extension test passed")
+                logger.info(f"Extended JSON example: {test_custom_ecg}")
+
+            # Test backward compatibility with rmsai_h5access
+            logger.info("Testing backward compatibility with access library...")
+
+            sys.path.insert(0, '.')
+            from rmsai_h5access import analyze_pacer_data, extract_vitals_from_event
+
+            with h5py.File(test_file, 'r') as f:
+                first_event = f[events[0]]
+
+                # Test pacer analysis (should work with new structure)
+                pacer_data = analyze_pacer_data(first_event)
+
+                if 'info' not in pacer_data:
+                    logger.error("Backward compatible pacer analysis failed")
+                    return False
+
+                logger.info("✅ Backward compatible pacer analysis working")
+
+                # Test vitals extraction (should work with new structure)
+                vitals_data = extract_vitals_from_event(first_event)
+
+                if not vitals_data:
+                    logger.error("Backward compatible vitals extraction failed")
+                    return False
+
+                # Check that thresholds are extracted properly
+                if 'HR' in vitals_data and 'upper_threshold' not in vitals_data['HR']:
+                    logger.error("Threshold extraction from extras failed")
+                    return False
+
+                logger.info("✅ Backward compatible vitals extraction working")
+
+            # Clean up test file
+            try:
+                os.remove(test_file)
+                logger.info("Test file cleaned up")
+            except:
+                pass
+
+            logger.info("✅ Extras JSON functionality tests passed")
+            return True
+
+        except Exception as e:
+            logger.error(f"❌ Extras JSON functionality test failed: {e}")
+            return False
+
     def run_tests(self, module: str = None) -> Dict[str, bool]:
         """Run all tests or specific module tests"""
         logger.info("Starting RMSAI Improvements Test Suite")
@@ -1029,7 +1326,8 @@ class ImprovementTester:
             'patient_analysis': self.test_patient_analysis,
             'pacer': self.test_pacer_functionality,
             'processor': self.test_lstm_processor,
-            'analysis': self.test_analysis_tools
+            'analysis': self.test_analysis_tools,
+            'extras': self.test_extras_json_functionality
         }
 
         if module and module in tests_to_run:
@@ -1085,7 +1383,7 @@ def main():
     parser.add_argument(
         'module',
         nargs='?',
-        choices=['api', 'analytics', 'thresholds', 'classification', 'dashboard', 'patient_analysis', 'pacer', 'processor', 'analysis'],
+        choices=['api', 'analytics', 'thresholds', 'classification', 'dashboard', 'patient_analysis', 'pacer', 'processor', 'analysis', 'extras'],
         help='Specific module to test (default: all)'
     )
     parser.add_argument(
