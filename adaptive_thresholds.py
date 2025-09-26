@@ -87,13 +87,6 @@ class AdaptiveThresholdManager:
             'performance_history': []
         }
 
-        self.thresholds['Unknown Arrhythmia'] = {
-            'threshold': 0.10,
-            'confidence': 0.7,
-            'last_updated': datetime.now().isoformat(),
-            'update_count': 0,
-            'performance_history': []
-        }
 
         logger.info(f"Initialized thresholds for {len(self.thresholds)} conditions")
 

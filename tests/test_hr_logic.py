@@ -48,7 +48,7 @@ def test_scenarios():
         (['Bradycardia'], 120, 1, "Bradycardia", "LSTM Brady + Tachy HR → LSTM wins"),
         (['Atrial Fibrillation (PTB-XL)'], 45, 1, "Atrial Fibrillation (PTB-XL)", "A-Fib + Brady HR → A-Fib wins"),
         (['Ventricular Tachycardia (MIT-BIH)'], 50, 1, "Ventricular Tachycardia (MIT-BIH)", "V-Tac + Brady HR → V-Tac wins"),
-        (['Unknown Arrhythmia'], 130, 1, "Unknown Arrhythmia", "Unknown + Tachy HR → Unknown wins"),
+        # Removed Unknown Arrhythmia test case as classification no longer exists
         ([], None, 0, "Normal", "Normal LSTM + No HR → Normal"),
         ([], "invalid", 0, "Normal", "Normal LSTM + Invalid HR → Normal"),
         # Edge cases and realistic clinical scenarios

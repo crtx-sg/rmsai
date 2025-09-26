@@ -90,9 +90,18 @@ class RMSAIDashboard:
         # Load processor configuration to get selected leads
         self.selected_leads = self._get_selected_leads()
 
+    def _extract_patient_id(self, source_file):
+        """Extract patient ID from source file path"""
+        if 'PT' in str(source_file):
+            # Find PT followed by digits
+            match = re.search(r'PT\d+', str(source_file))
+            if match:
+                return match.group()
+        return 'Unknown'
+
     def get_unified_ai_verdict(self, anomaly_types_list, heart_rate=None, anomaly_status_count=0):
         """
-        Unified AI verdict calculation with HR-based logic.
+        Unified AI verdict calculation returning highest severity condition only.
 
         Args:
             anomaly_types_list: List of anomaly types detected by LSTM
@@ -100,7 +109,7 @@ class RMSAIDashboard:
             anomaly_status_count: Number of chunks marked as anomalous
 
         Returns:
-            str: AI verdict (e.g., "Normal", "Tachycardia", "Ventricular Tachycardia (MIT-BIH)")
+            str: AI verdict showing only the highest severity condition (e.g., "Normal", "Tachycardia", "Ventricular Tachycardia (MIT-BIH)")
         """
         # Use shared configuration
         bradycardia_max_hr = HR_THRESHOLDS['bradycardia_max']
@@ -124,9 +133,10 @@ class RMSAIDashboard:
         if not unique_anomalies:
             return "Normal"
 
-        # Sort by clinical severity and return
+        # Sort by clinical severity and return ONLY the highest severity condition
         unique_anomalies = list(set(unique_anomalies))  # Remove duplicates
-        return ", ".join(sort_by_severity(unique_anomalies))
+        sorted_anomalies = sort_by_severity(unique_anomalies)
+        return sorted_anomalies[0] if sorted_anomalies else "Normal"  # Return only the most severe
 
     def calculate_performance_metrics(self, ai_predictions, ground_truth, positive_class='anomaly'):
         """
@@ -175,22 +185,85 @@ class RMSAIDashboard:
             'tp': tp, 'fp': fp, 'fn': fn, 'tn': tn
         }
 
+    def calculate_exact_condition_metrics(self, ai_predictions, ground_truth):
+        """
+        Calculate metrics using exact condition matching (not binary anomaly vs normal)
+
+        Args:
+            ai_predictions: List of AI predictions (exact conditions)
+            ground_truth: List of ground truth labels (exact conditions)
+
+        Returns:
+            dict: Dictionary containing precision, recall, f1, accuracy for exact matching
+        """
+        if len(ai_predictions) != len(ground_truth):
+            return {'precision': 0, 'recall': 0, 'f1': 0, 'accuracy': 0, 'support': 0}
+
+        # Exact condition matching
+        total_predictions = len(ai_predictions)
+        correct_predictions = sum(1 for ai, gt in zip(ai_predictions, ground_truth) if ai == gt)
+
+        # For multiclass exact matching, we calculate micro-averaged metrics
+        # Get all unique conditions
+        all_conditions = list(set(ai_predictions + ground_truth))
+
+        total_tp = 0
+        total_fp = 0
+        total_fn = 0
+        total_tn = 0
+
+        # Calculate per-condition metrics and sum them (micro-averaging)
+        for condition in all_conditions:
+            tp = sum(1 for ai, gt in zip(ai_predictions, ground_truth)
+                    if ai == condition and gt == condition)
+            fp = sum(1 for ai, gt in zip(ai_predictions, ground_truth)
+                    if ai == condition and gt != condition)
+            fn = sum(1 for ai, gt in zip(ai_predictions, ground_truth)
+                    if ai != condition and gt == condition)
+            tn = sum(1 for ai, gt in zip(ai_predictions, ground_truth)
+                    if ai != condition and gt != condition)
+
+            total_tp += tp
+            total_fp += fp
+            total_fn += fn
+            total_tn += tn
+
+        # Calculate micro-averaged metrics
+        precision = total_tp / (total_tp + total_fp) if (total_tp + total_fp) > 0 else 0
+        recall = total_tp / (total_tp + total_fn) if (total_tp + total_fn) > 0 else 0
+        f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+        accuracy = correct_predictions / total_predictions if total_predictions > 0 else 0
+
+        return {
+            'precision': precision,
+            'recall': recall,
+            'f1': f1,
+            'accuracy': accuracy,
+            'support': total_predictions,
+            'correct': correct_predictions,
+            'total': total_predictions,
+            'tp': total_tp,
+            'fp': total_fp,
+            'fn': total_fn,
+            'tn': total_tn
+        }
+
     def calculate_condition_specific_metrics(self, ai_predictions, ground_truth):
         """
-        Calculate metrics for each specific condition
+        Calculate metrics for each specific condition using exact matching
 
         Returns:
             dict: Metrics for each condition type
         """
-        # Get unique conditions (excluding Normal/Unknown)
+        # Get unique conditions (excluding Unknown)
         all_conditions = set(ground_truth + ai_predictions)
-        conditions = [c for c in all_conditions if c not in ['Normal', 'Unknown']]
+        conditions = [c for c in all_conditions if c != 'Unknown']
 
         results = {}
 
-        # Overall binary metrics (any anomaly vs normal)
-        results['Overall_Anomaly_Detection'] = self.calculate_performance_metrics(
-            ai_predictions, ground_truth, positive_class='anomaly'
+        # Overall exact condition matching metrics
+        results['Overall_Anomaly_Detection'] = self.calculate_exact_condition_metrics(
+            ai_predictions, ground_truth
         )
 
         # Condition-specific metrics
@@ -3148,12 +3221,57 @@ class RMSAIDashboard:
         st.header("👥 Patient Analysis")
         st.markdown("*Comprehensive patient view with event-level analysis and AI vs event condition comparison*")
 
+        # Option to filter by file existence
+        filter_by_files = st.checkbox("🗂️ Only show patients with existing data files", value=True,
+                                     help="Filter out patients whose source files no longer exist")
+
         if len(chunks_df) == 0:
             st.warning("No patient data available")
             return
 
-        # Patient selection
-        patients = sorted(chunks_df['patient_id'].unique()) if 'patient_id' in chunks_df.columns else []
+        # Patient selection - sort by most recent processing timestamp
+        if 'patient_id' in chunks_df.columns:
+            # Extract patient IDs
+            chunks_df['patient_id'] = chunks_df['source_file'].apply(self._extract_patient_id)
+
+            # Filter by file existence if requested
+            if filter_by_files:
+                existing_files_mask = chunks_df['source_file'].apply(os.path.exists)
+                chunks_df = chunks_df[existing_files_mask]
+                if len(chunks_df) == 0:
+                    st.warning("No patients found with existing data files")
+                    return
+
+            # Get most recent timestamp per patient
+            patient_timestamps = chunks_df.groupby('patient_id')['processing_timestamp'].max()
+            # Sort patients by most recent timestamp (descending)
+            patients = patient_timestamps.sort_values(ascending=False).index.tolist()
+
+            # Debug info for troubleshooting
+            with st.expander("🔧 Debug Info", expanded=False):
+                st.write(f"**Database path:** {os.path.abspath(self.db_path)}")
+                st.write(f"**Database exists:** {os.path.exists(self.db_path)}")
+                st.write(f"**Working directory:** {os.getcwd()}")
+                st.write(f"**Total chunks loaded:** {len(chunks_df)}")
+                st.write(f"**Patients found:** {len(patients)}")
+
+                # Show unique source files
+                st.write(f"**Source files in database:**")
+                unique_sources = sorted(chunks_df['source_file'].unique())
+                for source in unique_sources:
+                    patient_id = self._extract_patient_id(source)
+                    count = len(chunks_df[chunks_df['source_file'] == source])
+                    exists = os.path.exists(source)
+                    status = "✅" if exists else "❌"
+                    st.write(f"  {source} → {patient_id} ({count} chunks) {status}")
+
+                st.write(f"**Patient order (by latest activity):**")
+                for i, patient in enumerate(patients):
+                    latest = patient_timestamps[patient]
+                    chunk_count = len(chunks_df[chunks_df['patient_id'] == patient])
+                    st.write(f"  {i+1}. {patient} - {chunk_count} chunks, latest: {latest}")
+        else:
+            patients = []
 
         if not patients:
             st.warning("No patient IDs found in the data")
@@ -3264,8 +3382,8 @@ class RMSAIDashboard:
                 ai_predictions = valid_events['ai_verdict'].tolist()
                 ground_truth = valid_events['event_condition'].tolist()
 
-                # Calculate overall anomaly detection metrics
-                overall_metrics = self.calculate_performance_metrics(ai_predictions, ground_truth, 'anomaly')
+                # Calculate exact condition matching metrics (not binary anomaly detection)
+                overall_metrics = self.calculate_exact_condition_metrics(ai_predictions, ground_truth)
 
                 with col3:
                     st.metric("AI Accuracy", f"{overall_metrics['accuracy']*100:.1f}%")
@@ -3300,18 +3418,18 @@ class RMSAIDashboard:
             with col6:
                 st.metric("F1 Score", "N/A")
 
-        # Event Summary Table (with HR-based AI verdicts)
-        st.subheader("Event Summary - HR-Enhanced AI Verdicts")
+        # Event Summary Table (with AI verdicts showing highest severity only)
+        st.subheader("Event Summary - AI Verdicts")
 
         # Create event summary table
         event_summary = patient_events[['event_id', 'event_condition', 'ai_verdict', 'heart_rate', 'error_score', 'total_chunks']].copy()
-        event_summary.columns = ['Event ID', 'Event Condition', 'AI Verdict (HR-Enhanced)', 'Heart Rate (BPM)', 'Avg Error', 'Total Chunks']
+        event_summary.columns = ['Event ID', 'Event Condition', 'AI Verdict', 'Heart Rate (BPM)', 'Avg Error', 'Total Chunks']
         event_summary['Avg Error'] = event_summary['Avg Error'].round(4)
         event_summary['Heart Rate (BPM)'] = event_summary['Heart Rate (BPM)'].round(1)
 
         # Add comparison column with detailed mismatch detection
         def compare_enhanced_verdict(row):
-            ai_verdict = row['AI Verdict (HR-Enhanced)']
+            ai_verdict = row['AI Verdict']
             ground_truth = row['Event Condition']
 
             if ground_truth == 'Unknown':
@@ -4029,7 +4147,16 @@ class RMSAIDashboard:
         if st.sidebar.button("Clear Cache"):
             st.session_state.data_cache = {}
             st.session_state.cache_time = {}
-            st.success("Cache cleared!")
+            st.success("Cache cleared! Refresh page to see updated data.")
+
+        # Show cache status
+        if hasattr(st.session_state, 'cache_time') and st.session_state.cache_time:
+            main_cache_time = st.session_state.cache_time.get("main_data")
+            if main_cache_time:
+                cache_age = time.time() - main_cache_time
+                st.sidebar.info(f"Data cached {cache_age:.0f}s ago")
+        else:
+            st.sidebar.info("No cached data")
 
         # Load data
         chunks_df, files_df = self.load_data(use_cache, cache_duration)

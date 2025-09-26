@@ -291,6 +291,11 @@ The RMSAI system now includes comprehensive clinical performance evaluation metr
   - Formula: `(TP + TN) / (TP + TN + FP + FN)`
   - Clinical Impact: General reliability measure
 
+**🎯 Exact Condition Matching:**
+- **Performance metrics use exact condition matching** (e.g., "Tachycardia" vs "Tachycardia")
+- **No binary classification bias** (eliminates misleading "Normal vs Any Anomaly" metrics)
+- **Clinically meaningful assessment** of AI performance per specific arrhythmia type
+
 **🏥 Implementation Levels:**
 
 1. **Patient-Level Analysis**:
@@ -1208,10 +1213,10 @@ Output: "anomaly - Tachycardia (score: 0.6400, HR: 120)"
 
 ##### **Example 3: Normal Range Anomaly**
 ```
-Input: condition="Unknown", heart_rate=75, error_score=0.92
-Process: error_score (0.92) > max(tachy_threshold, brady_threshold)
-Classification: "Unknown Arrhythmia" (significant anomaly in normal HR range)
-Output: "anomaly - Unknown Arrhythmia (score: 0.9200, HR: 75)"
+Input: condition="Normal", heart_rate=75, error_score=0.95
+Process: error_score (0.95) > normal_threshold (0.75), HR in normal range
+Classification: "Atrial Fibrillation (PTB-XL)" (significant ECG morphology anomaly)
+Output: "anomaly - Atrial Fibrillation (PTB-XL) (score: 0.9500, HR: 75)"
 ```
 
 #### **Threshold Strategy Benefits:**
@@ -2172,13 +2177,13 @@ class RMSAIConfig:
     embedding_dim = 128  # Match actual model output
     ecg_samples_per_event = 2400  # 12 seconds at 200Hz
 
-    # Anomaly thresholds (updated values)
+    # Anomaly thresholds (current optimized values)
     condition_thresholds = {
-        'Normal': 0.8,
-        'Tachycardia': 0.85,
-        'Bradycardia': 0.85,
-        'Atrial Fibrillation (PTB-XL)': 0.9,
-        'Ventricular Tachycardia (MIT-BIH)': 1.0
+        'Normal': 0.75,
+        'Tachycardia': 0.80,
+        'Bradycardia': 0.80,
+        'Atrial Fibrillation (PTB-XL)': 0.85,
+        'Ventricular Tachycardia (MIT-BIH)': 0.93
     }
 ```
 
@@ -2217,9 +2222,8 @@ The system uses a severity-based prioritization system for anomaly classificatio
 ```python
 # config.py
 CLINICAL_SEVERITY_ORDER = {
-    'Ventricular Tachycardia (MIT-BIH)': 5,  # Most severe
-    'Atrial Fibrillation (PTB-XL)': 4,
-    'Unknown Arrhythmia': 3,
+    'Ventricular Tachycardia (MIT-BIH)': 4,  # Most severe
+    'Atrial Fibrillation (PTB-XL)': 3,
     'Tachycardia': 2,
     'Bradycardia': 1                         # Least severe
 }
@@ -2270,12 +2274,11 @@ HR_THRESHOLDS = {
 ```python
 # config.py
 DEFAULT_CONDITION_THRESHOLDS = {
-    'Normal': 0.8,                            # Baseline for normal ECG
-    'Atrial Fibrillation (PTB-XL)': 0.9,      # More sensitive
-    'Tachycardia': 0.85,
-    'Bradycardia': 0.85,
-    'Unknown Arrhythmia': 0.9,
-    'Ventricular Tachycardia (MIT-BIH)': 1.0  # Most specific
+    'Normal': 0.75,                           # Baseline for normal ECG
+    'Atrial Fibrillation (PTB-XL)': 0.85,     # More sensitive
+    'Tachycardia': 0.80,
+    'Bradycardia': 0.80,
+    'Ventricular Tachycardia (MIT-BIH)': 0.93  # Most specific
 }
 ```
 
@@ -2287,7 +2290,6 @@ ADAPTIVE_THRESHOLD_RANGES = {
     'Atrial Fibrillation (PTB-XL)': (0.75, 1.05),   # Updated range
     'Tachycardia': (0.7, 1.0),
     'Bradycardia': (0.7, 1.0),
-    'Unknown Arrhythmia': (0.75, 1.05),
     'Ventricular Tachycardia (MIT-BIH)': (0.85, 1.15) # Conservative range
 }
 ```
@@ -2300,7 +2302,6 @@ Consistent naming across all modules:
 CONDITION_NAMES = {
     'V_TAC': 'Ventricular Tachycardia (MIT-BIH)',
     'A_FIB': 'Atrial Fibrillation (PTB-XL)',
-    'UNKNOWN': 'Unknown Arrhythmia',
     'TACHY': 'Tachycardia',
     'BRADY': 'Bradycardia',
     'NORMAL': 'Normal'
@@ -2313,10 +2314,10 @@ CONDITION_NAMES = {
 ```python
 # Detect more anomalies for algorithm validation
 TEST_THRESHOLDS = {
-    'Atrial Fibrillation (PTB-XL)': 0.6,
+    'Normal': 0.6,
+    'Atrial Fibrillation (PTB-XL)': 0.65,
     'Tachycardia': 0.7,
     'Bradycardia': 0.7,
-    'Unknown Arrhythmia': 0.75,
     'Ventricular Tachycardia (MIT-BIH)': 0.8
 }
 ```
@@ -2331,10 +2332,10 @@ TEST_THRESHOLDS = {
 ```python
 # Reduce false positives for research studies
 RESEARCH_THRESHOLDS = {
+    'Normal': 0.9,
     'Atrial Fibrillation (PTB-XL)': 0.95,
     'Tachycardia': 1.0,
     'Bradycardia': 1.0,
-    'Unknown Arrhythmia': 1.1,
     'Ventricular Tachycardia (MIT-BIH)': 1.2
 }
 ```

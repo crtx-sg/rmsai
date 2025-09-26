@@ -38,7 +38,8 @@ import pandas as pd
 import torch
 import h5py
 from sklearn.preprocessing import StandardScaler
-from config import DEFAULT_CONDITION_THRESHOLDS, ADAPTIVE_THRESHOLD_RANGES, HR_THRESHOLDS, ENABLE_ADAPTIVE_THRESHOLDS
+from config import DEFAULT_CONDITION_THRESHOLDS, ADAPTIVE_THRESHOLD_RANGES, HR_THRESHOLDS, ENABLE_ADAPTIVE_THRESHOLDS, DEFAULT_PROCESSING_CONFIG
+from enum import Enum
 
 # File monitoring
 try:
@@ -71,6 +72,97 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+class ArrhythmiaState(Enum):
+    """Enum for arrhythmia classification states"""
+    NORMAL = "Normal"
+    BRADYCARDIA = "Bradycardia"
+    TACHYCARDIA = "Tachycardia"
+    ATRIAL_FIBRILLATION = "Atrial Fibrillation (PTB-XL)"
+    VENTRICULAR_TACHYCARDIA = "Ventricular Tachycardia (MIT-BIH)"
+
+class ArrhythmiaClassificationStateMachine:
+    """State machine for arrhythmia classification based on error scores and heart rate"""
+
+    def __init__(self, config):
+        self.config = config
+        self.logger = logging.getLogger(__name__)
+
+    def classify(self, original_condition: str, heart_rate: float,
+                is_anomaly: bool, error_score: float) -> str:
+        """
+        Main classification function using state machine logic - IGNORES original_condition
+
+        State Machine Flow (MSE-based only):
+        1. Check if anomaly detected
+        2. MSE-based classification (high priority: VTach, AFib)
+        3. Heart rate-based classification (intermediate MSE scores only: Tachy/Brady)
+        4. Default to normal
+
+        NOTE: original_condition is completely ignored - classification based purely on MSE + HR
+        """
+        # Ensure types are correct
+        error_score = float(error_score) if error_score is not None else DEFAULT_PROCESSING_CONFIG['default_error_score']
+        heart_rate = float(heart_rate) if heart_rate is not None else DEFAULT_PROCESSING_CONFIG['default_heart_rate']
+
+        if not is_anomaly:
+            return ArrhythmiaState.NORMAL.value
+
+        # Get all thresholds (fixed from DEFAULT_CONDITION_THRESHOLDS, ignore original_condition)
+        thresholds = self._get_all_thresholds()
+
+        # State machine transitions based ONLY on MSE (error_score) and heart rate
+        # original_condition is COMPLETELY IGNORED
+        state = self._determine_state_from_score(error_score, heart_rate, thresholds)
+
+        self.logger.debug(f"Classification: MSE={error_score:.4f}, HR={heart_rate}, "
+                         f"ignored_input='{original_condition}' → {state.value}")
+
+        return state.value
+
+    def _get_all_thresholds(self) -> Dict[str, float]:
+        """Get all threshold values from DEFAULT_CONDITION_THRESHOLDS only - ignore input condition"""
+        return {
+            'vtach': DEFAULT_CONDITION_THRESHOLDS[ArrhythmiaState.VENTRICULAR_TACHYCARDIA.value],
+            'afib': DEFAULT_CONDITION_THRESHOLDS[ArrhythmiaState.ATRIAL_FIBRILLATION.value],
+            'tachy': DEFAULT_CONDITION_THRESHOLDS[ArrhythmiaState.TACHYCARDIA.value],
+            'brady': DEFAULT_CONDITION_THRESHOLDS[ArrhythmiaState.BRADYCARDIA.value]
+        }
+
+    def _determine_state_from_score(self, error_score: float, heart_rate: float,
+                                   thresholds: Dict[str, float]) -> ArrhythmiaState:
+        """
+        State machine transitions based on error score first, then heart rate
+
+        PRIORITY 1: High-severity arrhythmias (score-based only)
+        PRIORITY 2: Rhythm arrhythmias (score + HR-based)
+        PRIORITY 3: Normal
+        """
+
+        # PRIORITY 1: High-severity conditions (score-based only)
+        if error_score >= thresholds['vtach']:
+            return ArrhythmiaState.VENTRICULAR_TACHYCARDIA
+
+        if error_score >= thresholds['afib']:
+            return ArrhythmiaState.ATRIAL_FIBRILLATION
+
+        # PRIORITY 2: Rhythm conditions (error in tachy/brady range → check HR)
+        if error_score >= max(thresholds['tachy'], thresholds['brady']):
+            return self._classify_rhythm_by_heart_rate(heart_rate)
+
+        # PRIORITY 3: Below anomaly thresholds
+        return ArrhythmiaState.NORMAL
+
+    def _classify_rhythm_by_heart_rate(self, heart_rate: float) -> ArrhythmiaState:
+        """Classify rhythm anomalies based on heart rate"""
+        if heart_rate >= self.config.tachycardia_min_hr:  # ≥100 BPM
+            return ArrhythmiaState.TACHYCARDIA
+        elif heart_rate <= self.config.bradycardia_max_hr:  # ≤60 BPM
+            return ArrhythmiaState.BRADYCARDIA
+        else:
+            # Normal HR (61-99) but error score in tachy/brady range only
+            # Should NOT assume AFib - return to normal since score < AFib threshold
+            return ArrhythmiaState.NORMAL
+
 class RMSAIConfig:
     """Configuration class for RMSAI processor"""
 
@@ -96,13 +188,13 @@ class RMSAIConfig:
         self.model_loading_method = "auto"  # "auto", "method1", "method2", "method3"
 
         # Anomaly detection thresholds (use shared configuration)
-        self.anomaly_threshold = 0.1  # Base threshold for MSE
+        self.anomaly_threshold = DEFAULT_PROCESSING_CONFIG['base_anomaly_threshold']
         self.condition_thresholds = DEFAULT_CONDITION_THRESHOLDS.copy()
 
         # Adaptive threshold configuration
         self.enable_adaptive_thresholds = ENABLE_ADAPTIVE_THRESHOLDS
-        self.adaptation_rate = 0.1  # How quickly to adapt (0.0-1.0)
-        self.min_samples_for_adaptation = 10  # Minimum samples before adapting
+        self.adaptation_rate = DEFAULT_PROCESSING_CONFIG['adaptation_rate']
+        self.min_samples_for_adaptation = DEFAULT_PROCESSING_CONFIG['min_samples_for_adaptation']
         self.threshold_multipliers = ADAPTIVE_THRESHOLD_RANGES.copy()  # Use shared configuration
 
         # Running statistics for adaptive thresholds
@@ -115,7 +207,7 @@ class RMSAIConfig:
 
         # Processing configuration
         self.batch_size = 1
-        self.max_queue_size = 100
+        self.max_queue_size = DEFAULT_PROCESSING_CONFIG['max_queue_size']
         self.processing_threads = 2
 
         # Chunking configuration (aligned with chunking_analysis.py)
@@ -166,6 +258,9 @@ class ModelManager:
         self.model = None
         self.scaler = StandardScaler()
         self.device = torch.device('cpu')  # Use CPU for stability
+
+        # Initialize state machine for arrhythmia classification
+        self.state_machine = ArrhythmiaClassificationStateMachine(config)
 
         # Load pre-trained model
         self.load_model()
@@ -304,17 +399,17 @@ class ModelManager:
 
     def detect_anomaly(self, original: np.ndarray, reconstructed: np.ndarray,
                       condition: str = None) -> Tuple[bool, float]:
-        """Detect anomaly based on reconstruction error with adaptive thresholds"""
+        """Detect anomaly based on reconstruction error - uses base threshold only, ignores condition"""
         try:
             # Calculate Mean Squared Error
             mse = np.mean((original - reconstructed) ** 2)
 
-            # Update adaptive threshold statistics
+            # Update adaptive threshold statistics (for monitoring purposes only)
             if self.config.enable_adaptive_thresholds and condition:
                 self._update_condition_statistics(condition, mse)
 
-            # Get current threshold (possibly adapted)
-            threshold = self._get_adaptive_threshold(condition)
+            # Use base anomaly threshold only - ignore input condition
+            threshold = self.config.anomaly_threshold
 
             is_anomaly = mse > threshold
 
@@ -322,7 +417,7 @@ class ModelManager:
 
         except Exception as e:
             logger.error(f"Error in anomaly detection: {e}")
-            return False, 0.0
+            return False, DEFAULT_PROCESSING_CONFIG['default_error_score']
 
     def _update_condition_statistics(self, condition: str, score: float):
         """Update running statistics for adaptive thresholds"""
@@ -333,8 +428,9 @@ class ModelManager:
         self.config.condition_scores[condition].append(score)
         self.config.condition_counts[condition] += 1
 
-        # Keep only recent scores (sliding window of 100 samples)
-        if len(self.config.condition_scores[condition]) > 100:
+        # Keep only recent scores (sliding window)
+        sliding_window_size = DEFAULT_PROCESSING_CONFIG['sliding_window_size']
+        if len(self.config.condition_scores[condition]) > sliding_window_size:
             self.config.condition_scores[condition].pop(0)
 
     def _get_adaptive_threshold(self, condition: str = None) -> float:
@@ -381,42 +477,21 @@ class ModelManager:
             sample_count = self.config.condition_counts.get(condition, 0)
             avg_score = (np.mean(self.config.condition_scores[condition])
                         if condition in self.config.condition_scores and self.config.condition_scores[condition]
-                        else 0.0)
+                        else DEFAULT_PROCESSING_CONFIG['default_error_score'])
 
             status[condition] = {
                 'base_threshold': base_threshold,
                 'current_threshold': current_threshold,
                 'sample_count': sample_count,
                 'avg_score': avg_score,
-                'adaptation_ratio': current_threshold / base_threshold if base_threshold > 0 else 1.0
+                'adaptation_ratio': current_threshold / base_threshold if base_threshold > 0 else DEFAULT_PROCESSING_CONFIG['default_adaptation_ratio']
             }
         return status
 
-    def classify_anomaly_by_heart_rate(self, original_condition: str, heart_rate: float,
-                                     is_anomaly: bool, error_score: float) -> str:
-        """Classify anomaly type based on heart rate for Tachy/Brady disambiguation"""
-        if not is_anomaly:
-            return "normal"
-
-        # If it's a specific non-rhythm condition, keep original classification
-        if original_condition in ['Atrial Fibrillation (PTB-XL)', 'Ventricular Tachycardia (MIT-BIH)']:
-            return original_condition
-
-        # For rhythm-based anomalies, use heart rate to classify
-        if heart_rate <= self.config.bradycardia_max_hr:
-            return 'Bradycardia'
-        elif heart_rate >= self.config.tachycardia_min_hr:
-            return 'Tachycardia'
-        else:
-            # Normal heart rate range (61-99 BPM) but anomalous pattern
-            # Use higher threshold between Tachy/Brady for classification
-            tachy_threshold = self._get_adaptive_threshold('Tachycardia')
-            brady_threshold = self._get_adaptive_threshold('Bradycardia')
-
-            if error_score > max(tachy_threshold, brady_threshold):
-                return 'Unknown Arrhythmia'  # Significant anomaly in normal HR range
-            else:
-                return 'Normal'  # False positive, likely normal variation
+    def classify_arrhythmia_with_state_machine(self, original_condition: str, heart_rate: float,
+                                              is_anomaly: bool, error_score: float) -> str:
+        """Classify arrhythmia using state machine approach - prioritizes MSE, uses HR only for tachy/brady"""
+        return self.state_machine.classify(original_condition, heart_rate, is_anomaly, error_score)
 
 class VectorDatabase:
     """Manages ChromaDB vector database operations"""
@@ -637,15 +712,16 @@ class ECGChunkProcessor:
                 chunk_data, reconstructed, condition
             )
 
-            # 4. Determine anomaly type using heart rate-based classification
-            if is_anomaly:
-                anomaly_type = self.model_manager.classify_anomaly_by_heart_rate(
-                    condition, heart_rate, is_anomaly, error_score
-                )
-                anomaly_status = "anomaly"
-            else:
-                anomaly_type = None
+            # 4. Determine anomaly type using state machine classification (MSE priority, HR for tachy/brady only)
+            anomaly_type = self.model_manager.classify_arrhythmia_with_state_machine(
+                condition, heart_rate, is_anomaly, error_score
+            )
+
+            if anomaly_type == ArrhythmiaState.NORMAL.value:
                 anomaly_status = "normal"
+                anomaly_type = None
+            else:
+                anomaly_status = "anomaly"
 
             # 5. Store embedding in vector database
             vector_metadata = {
@@ -839,7 +915,7 @@ class HDF5FileProcessor:
                         chunks_processed += 1
 
                     # Calculate average error score
-                    avg_error_score = sum(error_scores) / len(error_scores) if error_scores else 0.0
+                    avg_error_score = sum(error_scores) / len(error_scores) if error_scores else DEFAULT_PROCESSING_CONFIG['default_error_score']
 
                     # Get current adaptive threshold for this condition
                     current_threshold = self.chunk_processor.model_manager._get_adaptive_threshold(condition)
@@ -1107,7 +1183,7 @@ def main():
         while True:
             time.sleep(10)
 
-            # Print stats every 60 seconds
+            # Print stats periodically
             stats = processor.get_processing_stats()
             if stats:
                 logger.info(f"Processing stats: {stats}")

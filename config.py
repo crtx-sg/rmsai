@@ -7,9 +7,8 @@ Centralizes all configuration to avoid duplication and maintenance issues.
 # Clinical severity hierarchy for anomaly prioritization
 # Higher numbers indicate more severe conditions
 CLINICAL_SEVERITY_ORDER = {
-    'Ventricular Tachycardia (MIT-BIH)': 5,  # Most severe
-    'Atrial Fibrillation (PTB-XL)': 4,
-    'Unknown Arrhythmia': 3,
+    'Ventricular Tachycardia (MIT-BIH)': 4,  # Most severe
+    'Atrial Fibrillation (PTB-XL)': 3,
     'Tachycardia': 2,
     'Bradycardia': 1                         # Least severe
 }
@@ -25,7 +24,6 @@ HR_THRESHOLDS = {
 CONDITION_NAMES = {
     'V_TAC': 'Ventricular Tachycardia (MIT-BIH)',
     'A_FIB': 'Atrial Fibrillation (PTB-XL)',
-    'UNKNOWN': 'Unknown Arrhythmia',
     'TACHY': 'Tachycardia',
     'BRADY': 'Bradycardia',
     'NORMAL': 'Normal'
@@ -33,12 +31,11 @@ CONDITION_NAMES = {
 
 # Default reconstruction error thresholds per condition
 DEFAULT_CONDITION_THRESHOLDS = {
-    'Normal': 0.8,
-    'Atrial Fibrillation (PTB-XL)': 0.9,
-    'Tachycardia': 0.85,
-    'Bradycardia': 0.85,
-    'Unknown Arrhythmia': 0.9,
-    'Ventricular Tachycardia (MIT-BIH)': 1.0
+    'Normal': 0.75,   # 0.8
+    'Atrial Fibrillation (PTB-XL)': 0.85,   # 0.9
+    'Tachycardia': 0.80,  # 0.85
+    'Bradycardia': 0.80,  # 0.85
+    'Ventricular Tachycardia (MIT-BIH)': 0.93  # 1.0
 }
 
 # Adaptive threshold ranges per condition (min, max)
@@ -47,7 +44,6 @@ ADAPTIVE_THRESHOLD_RANGES = {
     'Atrial Fibrillation (PTB-XL)': (0.75, 1.05),
     'Tachycardia': (0.7, 1.0),
     'Bradycardia': (0.7, 1.0),
-    'Unknown Arrhythmia': (0.75, 1.05),
     'Ventricular Tachycardia (MIT-BIH)': (0.85, 1.15)
 }
 
@@ -69,6 +65,19 @@ def is_normal_heart_rate(heart_rate: float) -> bool:
 
 # Adaptive threshold configuration
 ENABLE_ADAPTIVE_THRESHOLDS = False  # Default: disabled
+
+# Default values for various processing parameters
+DEFAULT_PROCESSING_CONFIG = {
+    'base_anomaly_threshold': 0.1,      # Base MSE threshold for anomaly detection
+    'adaptation_rate': 0.1,             # How quickly to adapt thresholds (0.0-1.0)
+    'min_samples_for_adaptation': 10,   # Minimum samples before adapting
+    'default_heart_rate': 60.0,         # Default HR when None provided
+    'default_error_score': 0.0,         # Default error score when None/calculation fails
+    'default_adaptation_ratio': 1.0,    # Default ratio when base_threshold is 0
+    'max_queue_size': 100,              # Maximum processing queue size
+    'sliding_window_size': 100,         # Sliding window for adaptive thresholds
+    'stats_report_interval': 60         # Seconds between stats reports
+}
 
 # ECG Leads Configuration
 # Complete list of all possible ECG leads in the system
