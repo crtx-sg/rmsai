@@ -101,42 +101,90 @@ class RMSAIDashboard:
 
     def get_unified_ai_verdict(self, anomaly_types_list, heart_rate=None, anomaly_status_count=0):
         """
-        Unified AI verdict calculation returning highest severity condition only.
+        Unified AI verdict calculation with enhanced logic based on chunk distribution.
+
+        New Logic Rules:
+        1. Dominant Condition Rule (90% Majority): If any single condition (including "Normal")
+           makes up ≥ 90% of an event's chunks, it becomes the final verdict.
+        2. Majority Anomaly Rule: If 90% rule fails, look only at abnormal chunks and
+           return the most frequent anomaly type.
+        3. Severity Tie-Breaker: If multiple anomaly types are tied, pick the most severe.
+        4. Edge Case: If no abnormal chunks exist after 90% rule fails, default to "Normal".
 
         Args:
-            anomaly_types_list: List of anomaly types detected by LSTM
+            anomaly_types_list: List of anomaly types detected by LSTM for all chunks
             heart_rate: Heart rate value (optional, for HR-based detection)
             anomaly_status_count: Number of chunks marked as anomalous
 
         Returns:
-            str: AI verdict showing only the highest severity condition (e.g., "Normal", "Tachycardia", "Ventricular Tachycardia (MIT-BIH)")
+            str: AI verdict (e.g., "Normal", "Tachycardia", "Ventricular Tachycardia (MIT-BIH)")
         """
         # Use shared configuration
         bradycardia_max_hr = HR_THRESHOLDS['bradycardia_max']
         tachycardia_min_hr = HR_THRESHOLDS['tachycardia_min']
 
-        # Start with existing LSTM-detected anomaly types
-        unique_anomalies = list(set([t for t in anomaly_types_list if t and t != 'None' and pd.notna(t)]))
-
-        # HR-based anomaly detection: only apply when LSTM says "normal" (count=0)
-        if anomaly_status_count == 0 and heart_rate is not None:
-            try:
-                hr_value = float(heart_rate)
-                if hr_value <= bradycardia_max_hr:
-                    unique_anomalies.append('Bradycardia')
-                elif hr_value >= tachycardia_min_hr:
-                    unique_anomalies.append('Tachycardia')
-            except (ValueError, TypeError):
-                pass  # Skip if heart rate is not a valid number
-
-        # If no anomalies detected, return Normal
-        if not unique_anomalies:
+        total_chunks = len(anomaly_types_list)
+        if total_chunks == 0:
             return "Normal"
 
-        # Sort by clinical severity and return ONLY the highest severity condition
-        unique_anomalies = list(set(unique_anomalies))  # Remove duplicates
-        sorted_anomalies = sort_by_severity(unique_anomalies)
-        return sorted_anomalies[0] if sorted_anomalies else "Normal"  # Return only the most severe
+        # Count frequency of each condition (including "Normal" for non-anomalous chunks)
+        condition_counts = {}
+        normal_count = total_chunks - anomaly_status_count
+
+        # Count Normal chunks
+        if normal_count > 0:
+            condition_counts['Normal'] = normal_count
+
+        # Count anomaly types from anomalous chunks only
+        anomaly_types = [t for t in anomaly_types_list if t and t != 'None' and pd.notna(t)]
+        for anomaly_type in anomaly_types:
+            condition_counts[anomaly_type] = condition_counts.get(anomaly_type, 0) + 1
+
+        # Rule 1: Dominant Condition Rule (90% Majority)
+        for condition, count in condition_counts.items():
+            percentage = (count / total_chunks) * 100
+            if percentage >= 90:
+                # Apply HR-based detection only if returning "Normal" and no LSTM anomalies
+                if condition == "Normal" and anomaly_status_count == 0 and heart_rate is not None:
+                    try:
+                        hr_value = float(heart_rate)
+                        if hr_value <= bradycardia_max_hr:
+                            return 'Bradycardia'
+                        elif hr_value >= tachycardia_min_hr:
+                            return 'Tachycardia'
+                    except (ValueError, TypeError):
+                        pass
+                return condition
+
+        # Rule 2: Majority Anomaly Rule - look only at abnormal chunks
+        anomaly_condition_counts = {k: v for k, v in condition_counts.items() if k != 'Normal'}
+
+        # Rule 4: Edge Case - no abnormal chunks
+        if not anomaly_condition_counts:
+            # Apply HR-based detection if no LSTM anomalies
+            if heart_rate is not None:
+                try:
+                    hr_value = float(heart_rate)
+                    if hr_value <= bradycardia_max_hr:
+                        return 'Bradycardia'
+                    elif hr_value >= tachycardia_min_hr:
+                        return 'Tachycardia'
+                except (ValueError, TypeError):
+                    pass
+            return "Normal"
+
+        # Find the most frequent anomaly type(s)
+        max_count = max(anomaly_condition_counts.values())
+        most_frequent_anomalies = [condition for condition, count in anomaly_condition_counts.items()
+                                 if count == max_count]
+
+        # Rule 3: Severity Tie-Breaker
+        if len(most_frequent_anomalies) == 1:
+            return most_frequent_anomalies[0]
+        else:
+            # Multiple anomalies tied - return most severe
+            sorted_anomalies = sort_by_severity(most_frequent_anomalies)
+            return sorted_anomalies[0] if sorted_anomalies else "Normal"
 
     def calculate_performance_metrics(self, ai_predictions, ground_truth, positive_class='anomaly'):
         """
@@ -1260,24 +1308,62 @@ class RMSAIDashboard:
         # Process AI Anomaly Verdict - unique anomalies with most severe first
 
         def process_ai_verdict(anomaly_types_list, total_chunks, anomaly_count):
-            if not anomaly_types_list or anomaly_count == 0:
+            """
+            Process AI verdict using the new 90% majority rule logic.
+            This function is used for grouped events in the dashboard.
+            """
+            if total_chunks == 0:
                 return "Normal"
 
-            # Get unique anomaly types and sort by severity
-            unique_anomalies = list(set(anomaly_types_list))
-            sorted_anomalies = sort_by_severity(unique_anomalies)
+            # Count frequency of each condition (including "Normal" for non-anomalous chunks)
+            condition_counts = {}
+            normal_count = total_chunks - anomaly_count
 
-            if len(sorted_anomalies) == 1:
-                # Single anomaly type
-                anomaly = sorted_anomalies[0]
-                percentage = (anomaly_count / total_chunks) * 100
+            # Count Normal chunks
+            if normal_count > 0:
+                condition_counts['Normal'] = normal_count
+
+            # Count anomaly types from anomalous chunks only
+            valid_anomaly_types = [t for t in anomaly_types_list if t and t != 'None' and pd.notna(t)]
+            for anomaly_type in valid_anomaly_types:
+                condition_counts[anomaly_type] = condition_counts.get(anomaly_type, 0) + 1
+
+            # Rule 1: Dominant Condition Rule (90% Majority)
+            for condition, count in condition_counts.items():
+                percentage = (count / total_chunks) * 100
+                if percentage >= 90:
+                    return condition
+
+            # Rule 2: Majority Anomaly Rule - look only at abnormal chunks
+            anomaly_condition_counts = {k: v for k, v in condition_counts.items() if k != 'Normal'}
+
+            # Rule 4: Edge Case - no abnormal chunks
+            if not anomaly_condition_counts:
+                return "Normal"
+
+            # Find the most frequent anomaly type(s)
+            max_count = max(anomaly_condition_counts.values())
+            most_frequent_anomalies = [condition for condition, count in anomaly_condition_counts.items()
+                                     if count == max_count]
+
+            # Rule 3: Severity Tie-Breaker
+            if len(most_frequent_anomalies) == 1:
+                anomaly = most_frequent_anomalies[0]
+                percentage = (max_count / total_chunks) * 100
+                # Show percentage for low confidence cases
                 if percentage < 30:
                     return f"{anomaly} ({percentage:.0f}%)"
                 else:
                     return anomaly
             else:
-                # Multiple anomaly types
-                return ", ".join(sorted_anomalies)
+                # Multiple anomalies tied - return most severe
+                sorted_anomalies = sort_by_severity(most_frequent_anomalies)
+                most_severe = sorted_anomalies[0] if sorted_anomalies else "Normal"
+                percentage = (max_count / total_chunks) * 100
+                if percentage < 30:
+                    return f"{most_severe} ({percentage:.0f}%)"
+                else:
+                    return most_severe
 
         grouped['ai_anomaly_verdict'] = grouped.apply(
             lambda row: process_ai_verdict(

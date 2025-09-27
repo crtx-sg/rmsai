@@ -32,7 +32,7 @@ CONDITION_NAMES = {
 # Default reconstruction error thresholds per condition
 DEFAULT_CONDITION_THRESHOLDS = {
     'Normal': 0.75,   # 0.8
-    'Atrial Fibrillation (PTB-XL)': 0.85,   # 0.9
+    'Atrial Fibrillation (PTB-XL)': 0.87,   # 0.9
     'Tachycardia': 0.80,  # 0.85
     'Bradycardia': 0.80,  # 0.85
     'Ventricular Tachycardia (MIT-BIH)': 0.93  # 1.0

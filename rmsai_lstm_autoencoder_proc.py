@@ -768,9 +768,9 @@ class ECGChunkProcessor:
             }
 
             if anomaly_type:
-                logger.info(f"Processed {chunk_id}: {anomaly_status} - {anomaly_type} (score: {error_score:.4f}, HR: {heart_rate})")
+                logger.info(f"Processed {chunk_id}: {anomaly_status} - {anomaly_type} (mse: {error_score:.4f}, HR: {heart_rate})")
             else:
-                logger.info(f"Processed {chunk_id}: {anomaly_status} (score: {error_score:.4f})")
+                logger.info(f"Processed {chunk_id}: {anomaly_status} (mse: {error_score:.4f})")
             return result
 
         except Exception as e:
@@ -798,17 +798,24 @@ class HDF5FileProcessor:
                 hash_sha256.update(chunk)
         return hash_sha256.hexdigest()
 
-    def process_file(self, filepath: Path) -> bool:
-        """Process a single HDF5 file"""
+    def process_file(self, filepath: Path, quiet_startup: bool = False) -> bool:
+        """Process a single HDF5 file
+
+        Args:
+            filepath: Path to the HDF5 file to process
+            quiet_startup: If True, suppress logs for already processed files (used during startup)
+        """
         try:
-            logger.info(f"Processing file: {filepath}")
+            if not quiet_startup:
+                logger.info(f"Processing file: {filepath}")
 
             # Calculate file hash
             file_hash = self.calculate_file_hash(filepath)
 
             # Check if already processed
             if self.metadata_db.is_file_processed(str(filepath), file_hash):
-                logger.info(f"File {filepath} already processed, skipping")
+                if not quiet_startup:
+                    logger.info(f"File {filepath} already processed, skipping")
                 return True
 
             # Mark file as being processed
@@ -943,10 +950,19 @@ class FileMonitor:
         self.file_queue = queue.Queue(maxsize=config.max_queue_size)
         self.processing_thread = None
         self.running = False
+        self.startup_processed_files = set()  # Track files processed during startup
 
-    def start_monitoring(self):
-        """Start file monitoring"""
+    def start_monitoring(self, startup_processed_files=None):
+        """Start file monitoring
+
+        Args:
+            startup_processed_files: Set of file paths that were already processed during startup
+        """
         self.running = True
+
+        # Initialize with files processed during startup to avoid redundant detection
+        if startup_processed_files:
+            self.startup_processed_files = set(startup_processed_files)
 
         # Start processing thread
         self.processing_thread = threading.Thread(target=self._process_queue)
@@ -1022,7 +1038,8 @@ class FileMonitor:
         """Start polling-based monitoring"""
         logger.info("Starting polling-based file monitoring")
 
-        processed_files = set()
+        # Initialize with files that were processed during startup to avoid redundant detection
+        processed_files = set(self.startup_processed_files)
 
         while self.running:
             try:
@@ -1087,11 +1104,11 @@ class RMSAIProcessor:
         """Start the processing pipeline"""
         logger.info("Starting RMSAI processing pipeline...")
 
-        # Process any existing files
-        self.process_existing_files()
+        # Process any existing files and track them to avoid redundant detection
+        startup_processed_files = self.process_existing_files()
 
-        # Start monitoring for new files
-        self.file_monitor.start_monitoring()
+        # Start monitoring for new files, passing the startup processed files
+        self.file_monitor.start_monitoring(startup_processed_files)
 
         logger.info("RMSAI processing pipeline started")
 
@@ -1108,13 +1125,37 @@ class RMSAIProcessor:
         if h5_files:
             logger.info(f"Found {len(h5_files)} existing HDF5 files")
 
+            processed_count = 0
+            skipped_count = 0
+            error_count = 0
+
             for filepath in h5_files:
                 try:
-                    self.file_processor.process_file(filepath)
+                    # Check if file was already processed before attempting to process it
+                    file_hash = self.file_processor.calculate_file_hash(filepath)
+                    was_already_processed = self.file_processor.metadata_db.is_file_processed(str(filepath), file_hash)
+
+                    # Use quiet_startup=True to suppress individual file logs during startup
+                    success = self.file_processor.process_file(filepath, quiet_startup=True)
+
+                    if success:
+                        if was_already_processed:
+                            skipped_count += 1
+                        else:
+                            processed_count += 1
                 except Exception as e:
                     logger.error(f"Error processing existing file {filepath}: {e}")
+                    error_count += 1
+
+            # Provide a summary instead of individual file logs
+            if skipped_count > 0:
+                logger.info(f"Startup scan complete: {skipped_count} files already processed, {processed_count} newly processed, {error_count} errors")
+            else:
+                logger.info(f"Startup scan complete: {processed_count} files processed, {error_count} errors")
         else:
             logger.info("No existing HDF5 files found")
+
+        return h5_files  # Return the list of processed files
 
     def get_processing_stats(self) -> Dict[str, Any]:
         """Get processing statistics"""
