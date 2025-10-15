@@ -75,8 +75,6 @@ logger = logging.getLogger(__name__)
 class ArrhythmiaState(Enum):
     """Enum for arrhythmia classification states"""
     NORMAL = "Normal"
-    BRADYCARDIA = "Bradycardia"
-    TACHYCARDIA = "Tachycardia"
     ATRIAL_FIBRILLATION = "Atrial Fibrillation (PTB-XL)"
     VENTRICULAR_TACHYCARDIA = "Ventricular Tachycardia (MIT-BIH)"
 
@@ -120,48 +118,35 @@ class ArrhythmiaClassificationStateMachine:
         return state.value
 
     def _get_all_thresholds(self) -> Dict[str, float]:
-        """Get all threshold values from DEFAULT_CONDITION_THRESHOLDS only - ignore input condition"""
+        """Get all threshold values from DEFAULT_CONDITION_THRESHOLDS only"""
         return {
-            'vtach': DEFAULT_CONDITION_THRESHOLDS[ArrhythmiaState.VENTRICULAR_TACHYCARDIA.value],
+            'normal': DEFAULT_CONDITION_THRESHOLDS[ArrhythmiaState.NORMAL.value],
             'afib': DEFAULT_CONDITION_THRESHOLDS[ArrhythmiaState.ATRIAL_FIBRILLATION.value],
-            'tachy': DEFAULT_CONDITION_THRESHOLDS[ArrhythmiaState.TACHYCARDIA.value],
-            'brady': DEFAULT_CONDITION_THRESHOLDS[ArrhythmiaState.BRADYCARDIA.value]
+            'vtach': DEFAULT_CONDITION_THRESHOLDS[ArrhythmiaState.VENTRICULAR_TACHYCARDIA.value]
         }
 
     def _determine_state_from_score(self, error_score: float, heart_rate: float,
                                    thresholds: Dict[str, float]) -> ArrhythmiaState:
         """
-        State machine transitions based on error score first, then heart rate
+        LSTM classification based on MSE thresholds for Normal, AF, VT only
 
-        PRIORITY 1: High-severity arrhythmias (score-based only)
-        PRIORITY 2: Rhythm arrhythmias (score + HR-based)
-        PRIORITY 3: Normal
+        Classification logic:
+        - error_score >= VT threshold → VT
+        - error_score >= AF threshold → AF
+        - error_score < AF threshold → Normal (will be further classified with HR in logging)
         """
 
-        # PRIORITY 1: High-severity conditions (score-based only)
+        # Ventricular Tachycardia (highest threshold)
         if error_score >= thresholds['vtach']:
             return ArrhythmiaState.VENTRICULAR_TACHYCARDIA
 
+        # Atrial Fibrillation (middle threshold)
         if error_score >= thresholds['afib']:
             return ArrhythmiaState.ATRIAL_FIBRILLATION
 
-        # PRIORITY 2: Rhythm conditions (error in tachy/brady range → check HR)
-        if error_score >= max(thresholds['tachy'], thresholds['brady']):
-            return self._classify_rhythm_by_heart_rate(heart_rate)
-
-        # PRIORITY 3: Below anomaly thresholds
+        # Normal Sinus Rhythm (below AF threshold)
         return ArrhythmiaState.NORMAL
 
-    def _classify_rhythm_by_heart_rate(self, heart_rate: float) -> ArrhythmiaState:
-        """Classify rhythm anomalies based on heart rate"""
-        if heart_rate >= self.config.tachycardia_min_hr:  # ≥100 BPM
-            return ArrhythmiaState.TACHYCARDIA
-        elif heart_rate <= self.config.bradycardia_max_hr:  # ≤60 BPM
-            return ArrhythmiaState.BRADYCARDIA
-        else:
-            # Normal HR (61-99) but error score in tachy/brady range only
-            # Should NOT assume AFib - return to normal since score < AFib threshold
-            return ArrhythmiaState.NORMAL
 
 class RMSAIConfig:
     """Configuration class for RMSAI processor"""
@@ -770,7 +755,20 @@ class ECGChunkProcessor:
             if anomaly_type:
                 logger.info(f"Processed {chunk_id}: {anomaly_status} - {anomaly_type} (mse: {error_score:.4f}, HR: {heart_rate})")
             else:
-                logger.info(f"Processed {chunk_id}: {anomaly_status} (mse: {error_score:.4f})")
+                # Normal Sinus Rhythm case - check HR for variations
+                if heart_rate is not None:
+                    try:
+                        hr_value = float(heart_rate)
+                        if hr_value <= HR_THRESHOLDS['bradycardia_max']:
+                            logger.info(f"Processed {chunk_id}: Bradycardia (mse: {error_score:.4f}, HR: {heart_rate})")
+                        elif hr_value >= HR_THRESHOLDS['tachycardia_min']:
+                            logger.info(f"Processed {chunk_id}: Tachycardia (mse: {error_score:.4f}, HR: {heart_rate})")
+                        else:
+                            logger.info(f"Processed {chunk_id}: Normal Rhythm (mse: {error_score:.4f}, HR: {heart_rate})")
+                    except (ValueError, TypeError):
+                        logger.info(f"Processed {chunk_id}: Normal Rhythm (mse: {error_score:.4f}, HR: {heart_rate})")
+                else:
+                    logger.info(f"Processed {chunk_id}: Normal Rhythm (mse: {error_score:.4f})")
             return result
 
         except Exception as e:

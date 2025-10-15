@@ -101,15 +101,15 @@ class RMSAIDashboard:
 
     def get_unified_ai_verdict(self, anomaly_types_list, heart_rate=None, anomaly_status_count=0):
         """
-        Unified AI verdict calculation with enhanced logic based on chunk distribution.
+        Simplified AI verdict calculation: Pick the condition with highest severity from all chunks.
 
-        New Logic Rules:
-        1. Dominant Condition Rule (90% Majority): If any single condition (including "Normal")
-           makes up ≥ 90% of an event's chunks, it becomes the final verdict.
-        2. Majority Anomaly Rule: If 90% rule fails, look only at abnormal chunks and
-           return the most frequent anomaly type.
-        3. Severity Tie-Breaker: If multiple anomaly types are tied, pick the most severe.
-        4. Edge Case: If no abnormal chunks exist after 90% rule fails, default to "Normal".
+        Logic:
+        1. Collect all anomaly types from chunks (AF, VT only from LSTM)
+        2. If rhythm abnormalities found (AF/VT), return highest severity
+        3. If only Normal Sinus Rhythm variations, simplify based on HR patterns:
+           - If only NSR + Tachycardia → return "Tachycardia"
+           - If only NSR + Bradycardia → return "Bradycardia"
+           - Otherwise → return HR-based verdict
 
         Args:
             anomaly_types_list: List of anomaly types detected by LSTM for all chunks
@@ -117,74 +117,38 @@ class RMSAIDashboard:
             anomaly_status_count: Number of chunks marked as anomalous
 
         Returns:
-            str: AI verdict (e.g., "Normal", "Tachycardia", "Ventricular Tachycardia (MIT-BIH)")
+            str: AI verdict - highest severity condition found
         """
         # Use shared configuration
         bradycardia_max_hr = HR_THRESHOLDS['bradycardia_max']
         tachycardia_min_hr = HR_THRESHOLDS['tachycardia_min']
 
-        total_chunks = len(anomaly_types_list)
-        if total_chunks == 0:
-            return "Normal"
+        # Collect all unique anomaly types from chunks (only AF and VT from LSTM)
+        unique_anomalies = list(set([t for t in anomaly_types_list if t and t != 'None' and pd.notna(t)]))
 
-        # Count frequency of each condition (including "Normal" for non-anomalous chunks)
-        condition_counts = {}
-        normal_count = total_chunks - anomaly_status_count
-
-        # Count Normal chunks
-        if normal_count > 0:
-            condition_counts['Normal'] = normal_count
-
-        # Count anomaly types from anomalous chunks only
-        anomaly_types = [t for t in anomaly_types_list if t and t != 'None' and pd.notna(t)]
-        for anomaly_type in anomaly_types:
-            condition_counts[anomaly_type] = condition_counts.get(anomaly_type, 0) + 1
-
-        # Rule 1: Dominant Condition Rule (90% Majority)
-        for condition, count in condition_counts.items():
-            percentage = (count / total_chunks) * 100
-            if percentage >= 90:
-                # Apply HR-based detection only if returning "Normal" and no LSTM anomalies
-                if condition == "Normal" and anomaly_status_count == 0 and heart_rate is not None:
-                    try:
-                        hr_value = float(heart_rate)
-                        if hr_value <= bradycardia_max_hr:
-                            return 'Bradycardia'
-                        elif hr_value >= tachycardia_min_hr:
-                            return 'Tachycardia'
-                    except (ValueError, TypeError):
-                        pass
-                return condition
-
-        # Rule 2: Majority Anomaly Rule - look only at abnormal chunks
-        anomaly_condition_counts = {k: v for k, v in condition_counts.items() if k != 'Normal'}
-
-        # Rule 4: Edge Case - no abnormal chunks
-        if not anomaly_condition_counts:
-            # Apply HR-based detection if no LSTM anomalies
-            if heart_rate is not None:
-                try:
-                    hr_value = float(heart_rate)
-                    if hr_value <= bradycardia_max_hr:
-                        return 'Bradycardia'
-                    elif hr_value >= tachycardia_min_hr:
-                        return 'Tachycardia'
-                except (ValueError, TypeError):
-                    pass
-            return "Normal"
-
-        # Find the most frequent anomaly type(s)
-        max_count = max(anomaly_condition_counts.values())
-        most_frequent_anomalies = [condition for condition, count in anomaly_condition_counts.items()
-                                 if count == max_count]
-
-        # Rule 3: Severity Tie-Breaker
-        if len(most_frequent_anomalies) == 1:
-            return most_frequent_anomalies[0]
-        else:
-            # Multiple anomalies tied - return most severe
-            sorted_anomalies = sort_by_severity(most_frequent_anomalies)
+        # If rhythm abnormalities found (AF or VT), return the highest severity one
+        if unique_anomalies:
+            sorted_anomalies = sort_by_severity(unique_anomalies)
             return sorted_anomalies[0] if sorted_anomalies else "Normal"
+
+        # No rhythm abnormalities detected - all chunks are Normal Sinus Rhythm
+        # Check HR to determine if it's consistently Tachycardia or Bradycardia
+        if heart_rate is not None:
+            try:
+                hr_value = float(heart_rate)
+                if hr_value <= bradycardia_max_hr:
+                    # If event HR is consistently in brady range, report as Bradycardia
+                    return 'Bradycardia'
+                elif hr_value >= tachycardia_min_hr:
+                    # If event HR is consistently in tachy range, report as Tachycardia
+                    return 'Tachycardia'
+                else:
+                    # Normal HR range
+                    return 'Normal'
+            except (ValueError, TypeError):
+                pass
+
+        return "Normal"
 
     def calculate_performance_metrics(self, ai_predictions, ground_truth, positive_class='anomaly'):
         """
@@ -294,6 +258,64 @@ class RMSAIDashboard:
             'fp': total_fp,
             'fn': total_fn,
             'tn': total_tn
+        }
+
+    def get_clinical_group(self, condition: str) -> str:
+        """Group conditions into clinical categories for evaluation"""
+        # Normal group includes all Normal Sinus Rhythm variations
+        if condition in ['Normal', 'Unknown']:
+            return 'Normal'
+        # Rhythm abnormalities (AF, VT)
+        elif condition in ['Atrial Fibrillation (PTB-XL)', 'Ventricular Tachycardia (MIT-BIH)']:
+            return 'Rhythm_Abnormality'
+        # Rate abnormalities (Tachycardia, Bradycardia)
+        elif condition in ['Tachycardia', 'Bradycardia']:
+            return 'Rate_Abnormality'
+        else:
+            return 'Other_Abnormality'
+
+    def calculate_clinical_grouped_metrics(self, ai_predictions, ground_truth):
+        """
+        Calculate metrics using clinical grouping instead of exact matching
+        Groups: Normal, Rhythm_Abnormality, Rate_Abnormality, Other_Abnormality
+        """
+        if len(ai_predictions) != len(ground_truth):
+            return {'precision': 0, 'recall': 0, 'f1': 0, 'accuracy': 0, 'support': 0}
+
+        # Convert to clinical groups
+        ai_groups = [self.get_clinical_group(pred) for pred in ai_predictions]
+        gt_groups = [self.get_clinical_group(gt) for gt in ground_truth]
+
+        # Calculate exact group matching
+        total_predictions = len(ai_groups)
+        correct_predictions = sum(1 for ai, gt in zip(ai_groups, gt_groups) if ai == gt)
+        accuracy = correct_predictions / total_predictions if total_predictions > 0 else 0
+
+        # Calculate per-group metrics
+        unique_groups = list(set(ai_groups + gt_groups))
+        total_tp = total_fp = total_fn = 0
+
+        for group in unique_groups:
+            tp = sum(1 for ai, gt in zip(ai_groups, gt_groups) if ai == group and gt == group)
+            fp = sum(1 for ai, gt in zip(ai_groups, gt_groups) if ai == group and gt != group)
+            fn = sum(1 for ai, gt in zip(ai_groups, gt_groups) if ai != group and gt == group)
+
+            total_tp += tp
+            total_fp += fp
+            total_fn += fn
+
+        # Calculate micro-averaged metrics
+        precision = total_tp / (total_tp + total_fp) if (total_tp + total_fp) > 0 else 0
+        recall = total_tp / (total_tp + total_fn) if (total_tp + total_fn) > 0 else 0
+        f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+
+        return {
+            'precision': precision,
+            'recall': recall,
+            'f1': f1,
+            'accuracy': accuracy,
+            'support': total_predictions,
+            'clinical_groups': True
         }
 
     def calculate_condition_specific_metrics(self, ai_predictions, ground_truth):
@@ -3468,23 +3490,23 @@ class RMSAIDashboard:
                 ai_predictions = valid_events['ai_verdict'].tolist()
                 ground_truth = valid_events['event_condition'].tolist()
 
-                # Calculate exact condition matching metrics (not binary anomaly detection)
-                overall_metrics = self.calculate_exact_condition_metrics(ai_predictions, ground_truth)
+                # Calculate clinical grouped metrics (more clinically relevant than exact matching)
+                overall_metrics = self.calculate_clinical_grouped_metrics(ai_predictions, ground_truth)
 
                 with col3:
                     st.metric("AI Accuracy", f"{overall_metrics['accuracy']*100:.1f}%")
 
                 with col4:
                     st.metric("Precision", f"{overall_metrics['precision']*100:.1f}%",
-                             help="Of AI-detected anomalies, how many were actually anomalies?")
+                             help="Clinical Grouped: Normal, Rhythm Abnormalities (AF/VT), Rate Abnormalities (Tachy/Brady)")
 
                 with col5:
                     st.metric("Recall", f"{overall_metrics['recall']*100:.1f}%",
-                             help="Of actual anomalies, how many did AI detect?")
+                             help="Clinical Grouped: Groups similar conditions for more meaningful evaluation")
 
                 with col6:
                     st.metric("F1 Score", f"{overall_metrics['f1']*100:.1f}%",
-                             help="Harmonic mean of Precision and Recall")
+                             help="Uses clinical grouping instead of exact condition matching")
             else:
                 with col3:
                     st.metric("AI Accuracy", "N/A")
