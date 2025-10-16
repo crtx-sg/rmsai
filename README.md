@@ -271,9 +271,9 @@ The RMSAI Enhanced ECG Anomaly Detection System follows a modular, real-time pro
 
 #### 🎯 **Clinical Performance Metrics System**
 
-The RMSAI system now includes comprehensive clinical performance evaluation metrics essential for medical AI validation and regulatory compliance.
+The RMSAI system includes comprehensive clinical performance evaluation metrics at multiple levels, essential for medical AI validation and regulatory compliance.
 
-**📊 Performance Metrics Available:**
+**📊 Core Performance Metrics:**
 
 - **Precision**: Reliability of AI anomaly predictions (reduces false alarms)
   - Formula: `TP / (TP + FP)`
@@ -291,38 +291,194 @@ The RMSAI system now includes comprehensive clinical performance evaluation metr
   - Formula: `(TP + TN) / (TP + TN + FP + FN)`
   - Clinical Impact: General reliability measure
 
-**🎯 Exact Condition Matching:**
-- **Performance metrics use exact condition matching** (e.g., "Tachycardia" vs "Tachycardia")
-- **No binary classification bias** (eliminates misleading "Normal vs Any Anomaly" metrics)
-- **Clinically meaningful assessment** of AI performance per specific arrhythmia type
+**🔬 LSTM Classification Thresholds:**
 
-**🏥 Implementation Levels:**
+The system uses MSE (Mean Squared Error) thresholds for rhythm disorder detection:
 
-1. **Patient-Level Analysis**:
-   ```
-   ┌─────────────────────────────────────────────────────────┐
-   │ Patient PT7206 Performance Summary                      │
-   ├─────────────────────────────────────────────────────────┤
-   │ Total Events: 8    │ AI Accuracy: 87.5%                │
-   │ AI Detected: 6     │ Precision: 83.3%                  │
-   │ Anomalies: 5       │ Recall: 100.0%                    │
-   │ Normal: 3          │ F1-Score: 90.9%                   │
-   └─────────────────────────────────────────────────────────┘
-   ```
+```python
+DEFAULT_CONDITION_THRESHOLDS = {
+    'Normal': 0.75,                           # Normal Sinus Rhythm baseline
+    'Atrial Fibrillation (PTB-XL)': 0.87,    # AF detection threshold
+    'Ventricular Tachycardia (MIT-BIH)': 1.0  # VT detection threshold
+}
+```
 
-2. **System-Wide Analysis**:
-   ```
-   ┌─────────────────────────────────────────────────────────┐
-   │ System Performance (All Patients)                      │
-   ├─────────────────────────────────────────────────────────┤
-   │ System Precision: 78.6%  │ Events Analyzed: 24          │
-   │ System Recall: 91.7%     │ Clinical Insights:           │
-   │ System F1-Score: 84.6%   │ ✅ High recall - Most        │
-   │ Events Analyzed: 24       │    anomalies detected        │
-   └─────────────────────────────────────────────────────────┘
-   ```
+**Classification Logic:**
+- **MSE ≥ 1.0** → Ventricular Tachycardia (VT)
+- **MSE ≥ 0.87** → Atrial Fibrillation (AF)
+- **MSE < 0.87** → Normal Sinus Rhythm (NSR)
+  - NSR with HR ≤ 60 BPM → Logged as "Normal Sinus Rhythm, Bradycardia"
+  - NSR with HR ≥ 100 BPM → Logged as "Normal Sinus Rhythm, Tachycardia"
+  - NSR with HR 61-99 BPM → Logged as "Normal Sinus Rhythm"
 
-3. **Condition-Specific Performance**:
+**🎯 Clinical Grouping for Evaluation:**
+
+Performance metrics use clinical grouping to provide meaningful evaluation:
+
+- **Normal Group**: Normal, Normal Sinus Rhythm (all variations)
+- **Rhythm Abnormalities**: Atrial Fibrillation, Ventricular Tachycardia
+- **Rate Abnormalities**: Tachycardia, Bradycardia (when reported as event verdicts)
+
+This grouping ensures that clinically similar conditions are evaluated together, providing more realistic performance assessment than strict exact matching.
+
+**🏥 Performance Metrics at Multiple Levels:**
+
+#### **1. Event-Level Metrics** (Chunk Analysis)
+
+At the chunk level, the system provides detailed MSE scores and classifications:
+
+```
+Example Event Processing:
+┌──────────────────────────────────────────────────────────────────┐
+│ Processing event_1001: Atrial Fibrillation (PTB-XL) (HR: 149.9) │
+├──────────────────────────────────────────────────────────────────┤
+│ Chunk 1: Normal Sinus Rhythm (mse: 0.6368, HR: 149.9)          │
+│ Chunk 2: anomaly - Tachycardia (mse: 0.9383, HR: 149.9)        │
+│ Chunk 3: Normal Sinus Rhythm (mse: 0.6853, HR: 149.9)          │
+│ ...                                                              │
+│ Chunk 33: anomaly - Ventricular Tachycardia (mse: 1.0698)      │
+├──────────────────────────────────────────────────────────────────┤
+│ AI Verdict: Ventricular Tachycardia (MIT-BIH)                  │
+│ (Highest severity from all chunks)                              │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+**Event-Level AI Verdict Logic:**
+1. Collect all anomaly types from chunks (AF, VT from LSTM)
+2. If rhythm abnormalities found → Return highest severity
+3. If only Normal Sinus Rhythm variations:
+   - HR ≤ 60 BPM → Verdict: "Bradycardia"
+   - HR ≥ 100 BPM → Verdict: "Tachycardia"
+   - HR 61-99 BPM → Verdict: "Normal"
+
+#### **2. Patient-Level Metrics**
+
+Aggregated metrics for individual patients across all their events:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│ Patient PT7046 Performance Summary                      │
+├─────────────────────────────────────────────────────────┤
+│ Total Events: 15   │ AI Accuracy: 73.3%                │
+│ AI Detected: 12    │ Precision: 75.0%                  │
+│ Ground Truth:      │ Recall: 81.8%                     │
+│  - Normal: 3       │ F1-Score: 78.3%                   │
+│  - AF: 2           │                                    │
+│  - VT: 7           │ Clinical Grouping Applied         │
+│  - Tachy: 2        │                                    │
+│  - Brady: 1        │                                    │
+└─────────────────────────────────────────────────────────┘
+```
+
+**Calculation Method:**
+- Compares AI verdict vs Ground Truth for each event
+- Uses clinical grouping (Normal, Rhythm Abnormality, Rate Abnormality)
+- Excludes events with "Unknown" ground truth
+- Provides patient-specific performance insights
+
+#### **3. System-Wide Metrics**
+
+Overall system performance across all patients and events:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│ System Performance (All Patients)                      │
+├─────────────────────────────────────────────────────────┤
+│ Total Events: 150  │ System Accuracy: 76.7%            │
+│ Total Patients: 10 │ System Precision: 78.6%           │
+│ Anomalies: 98      │ System Recall: 85.2%              │
+│ Normal: 52         │ System F1-Score: 81.8%            │
+├─────────────────────────────────────────────────────────┤
+│ Clinical Insights:                                      │
+│ ✅ High recall (85%) - Most anomalies detected         │
+│ ⚠️  Precision (79%) - Some false positives present     │
+│ 📊 Balanced F1 (82%) - Good overall performance        │
+└─────────────────────────────────────────────────────────┘
+```
+
+#### **4. Condition-Specific Metrics**
+
+Performance breakdown by specific cardiac conditions:
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│ Condition-Specific Performance                               │
+├──────────────────────────────────────────────────────────────┤
+│ Atrial Fibrillation (PTB-XL):                               │
+│   Precision: 82.4%  │ Recall: 87.5%  │ F1: 84.9%           │
+│   Support: 24 events                                         │
+│                                                              │
+│ Ventricular Tachycardia (MIT-BIH):                          │
+│   Precision: 91.3%  │ Recall: 95.5%  │ F1: 93.3%           │
+│   Support: 44 events                                         │
+│                                                              │
+│ Tachycardia:                                                 │
+│   Precision: 68.2%  │ Recall: 71.4%  │ F1: 69.8%           │
+│   Support: 21 events                                         │
+│                                                              │
+│ Bradycardia:                                                 │
+│   Precision: 73.3%  │ Recall: 78.6%  │ F1: 75.9%           │
+│   Support: 14 events                                         │
+│                                                              │
+│ Normal:                                                      │
+│   Precision: 75.5%  │ Recall: 68.9%  │ F1: 72.1%           │
+│   Support: 47 events                                         │
+└──────────────────────────────────────────────────────────────┘
+```
+
+**Interpretation Guidelines:**
+- **Precision > 85%**: Excellent - Very few false alarms
+- **Recall > 90%**: Excellent - Rarely misses anomalies (critical for patient safety)
+- **F1-Score > 80%**: Good - Balanced performance
+- **Support**: Number of events in ground truth for that condition
+
+**📊 How Metrics Are Calculated:**
+
+```python
+# Event-level comparison
+for each event:
+    ai_verdict = get_unified_ai_verdict(chunks)  # Highest severity
+    ground_truth = event_condition                # From HDF5 metadata
+
+    # Apply clinical grouping
+    ai_group = get_clinical_group(ai_verdict)
+    gt_group = get_clinical_group(ground_truth)
+
+    if ai_group == gt_group:
+        correct += 1
+
+# Calculate metrics
+accuracy = correct / total_events
+precision = TP / (TP + FP)  # Per group
+recall = TP / (TP + FN)      # Per group
+f1 = 2 * (precision * recall) / (precision + recall)
+```
+
+**🔍 Example Calculation:**
+
+Given 10 events for a patient:
+- 3 × AF (ground truth) → AI correctly identified 2 as AF, missed 1 as Normal
+- 2 × VT (ground truth) → AI correctly identified both as VT
+- 3 × Normal (ground truth) → AI correctly identified 2 as Normal, 1 as Tachy
+- 2 × Tachy (ground truth) → AI correctly identified both as Tachy
+
+```
+Confusion Matrix (Clinical Grouping):
+                 Predicted
+                 Normal  Rhythm  Rate
+Ground Truth:
+Normal             2       0      1
+Rhythm             1       4      0
+Rate               0       0      2
+
+Metrics:
+- Accuracy: (2+4+2)/10 = 80.0%
+- Precision (Rhythm): 4/(4+0) = 100%
+- Recall (Rhythm): 4/(3+2) = 80%
+- F1 (Rhythm): 88.9%
+```
+
+3. **Legacy Section (Keep for compatibility)**:
    ```
    ┌───────────────────────────────────────────────────────────┐
    │ Condition                    │ Precision │ Recall │ F1    │
